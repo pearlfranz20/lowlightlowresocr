@@ -177,6 +177,67 @@ For a more rigorous comparison than your own held-out set:
 - Box extraction without `scipy` is a coarse single-box fallback — fine for
   one sign in frame, not for scenes with multiple separated text regions.
 
+## Results (synthetic benchmark)
+
+There's no real labeled dataset in this repo (see caveats above), so these
+charts come from `benchmark.py`: a small procedural "signs" dataset (stop /
+yield / speed-limit-25 / speed-limit-45 / warning, rendered with PIL, each
+with a ground-truth text mask), with `DualPathwayClassifier` and both
+ablation baselines trained briefly against a random corruption-severity
+sweep. `plot_results.py` renders the charts below from its output. Treat
+this as a demonstration of the mechanics, not a claim about real-world
+sign/text accuracy — this is still "not pretrained" scaffolding, just like
+the rest of the repo.
+
+Two of the five classes (`speed_limit_25`, `speed_limit_45`) share
+identical shape and color and differ *only* by their digits, specifically
+so there's a case a shape-only view structurally can't resolve — the case
+fusion is supposed to help with.
+
+**Accuracy vs. corruption severity:**
+
+![Accuracy vs. corruption severity](assets/severity_curve.png)
+
+`parvo_only` degrades as corruption increases, as expected — full-color,
+full-resolution input degrading is exactly what should hurt a
+detail-dependent classifier. `magno_only` is flat by construction (its
+input is always derived from the pre-corruption image), but notably *not*
+low: at this resolution it still picks up a coarse ink-density signal for
+the digit pair rather than being fully blind to it, so its flat baseline
+sits above `parvo_only` at every severity level, clean included.
+
+**Learned gate weighting:**
+
+![Learned gate weighting](assets/gate_weights.png)
+
+This is the honest result, not the idealized one: the gate collapsed onto
+magno almost entirely (~98/2) at *both* clean and heavily-corrupted input —
+it didn't learn to shift with severity. Given `magno_only` outperformed
+`parvo_only` even on clean input in this run, collapsing onto the stronger
+average pathway is the locally rational thing for the gate to learn; it's
+also a direct, concrete instance of the exact failure mode the
+[Training strategy](#training-strategy) section above warns about, despite
+this run using both random pathway degradation *and* pathway dropout. If
+you're training this for real, log gate weights like this on your own
+validation set rather than assuming the mechanism worked.
+
+**Text region detection quality:**
+
+![Text detection quality](assets/text_metrics.png)
+
+High recall, low precision — the trained head reliably finds *a* region
+containing text but over-predicts its extent (expected from a handful of
+epochs on ~750 toy images); both metrics dip modestly under heavy
+corruption.
+
+Reproduce with:
+
+```bash
+pip install pillow matplotlib  # in addition to torch, scipy
+python benchmark.py    # trains the three models, writes benchmark_results.json
+python plot_results.py # renders assets/*.png from that json
+```
+
 ## Decision layer (optional): Jev
 
 The model's raw outputs aren't decisions: logits aren't calibrated
@@ -212,3 +273,5 @@ act on directly instead of hand-rolling threshold logic on logits.
 | `dual_pathway_classifier.py` | Full model, fusion, text head, OCR integration, training loop |
 | `evaluate.py` | Baselines, degradation-curve metrics, text-detection metrics, OCR comparison |
 | `jev_decision.py` | Optional: turns model output into a calibrated action decision via Jev |
+| `benchmark.py` | Synthetic dataset + training run behind the Results section, reproducible |
+| `plot_results.py` | Renders `assets/*.png` from `benchmark.py`'s output |
