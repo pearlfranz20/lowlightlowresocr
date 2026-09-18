@@ -238,6 +238,50 @@ python benchmark.py    # trains the three models, writes benchmark_results.json
 python plot_results.py # renders assets/*.png from that json
 ```
 
+## Results (real data: GTSRB subset)
+
+Same setup, real photographs this time — a 10-class subset of
+[GTSRB](https://benchmark.ini.rub.de/gtsrb_news.html) (German Traffic Sign
+Recognition Benchmark): four speed-limit signs that share shape/color and
+differ only by digits (`speed_30`/`50`/`60`/`70` — the real-world version
+of the synthetic pair above), plus six shape-distinct classes (`stop`,
+`yield`, `priority_road`, `no_entry`, `general_caution`, `keep_right`).
+Split by GTSRB "track" (each physical sign is a ~30-frame burst; a random
+per-image split would leak near-duplicates between train/test), 928 train /
+224 test images total. See `benchmark_gtsrb.py` for the exact setup —
+GTSRB itself isn't in this repo (~270MB), so this one isn't runnable
+without downloading it first (instructions in the script's docstring).
+
+**Accuracy vs. corruption severity:**
+
+![Accuracy vs. corruption severity, GTSRB](assets/gtsrb_severity_curve.png)
+
+This is the cleaner result of the two: `parvo_only` shows a real, steady
+decline as corruption rises (67.9% → 48.2%), `magno_only` stays flat and
+strong (95.5%, structurally unaffected — same reason as above), and
+`dual_pathway` (90.2–90.6%) sits close to but consistently below
+`magno_only` rather than exactly matching it.
+
+**Learned gate weighting:**
+
+![Learned gate weighting, GTSRB](assets/gtsrb_gate_weights.png)
+
+Still leans heavily on magno, but this time it's not a total freeze: parvo's
+share drops from 5% clean to 2% corrupted — a real, if modest, shift in the
+expected direction, unlike the synthetic run above. `dual_pathway` scoring
+slightly *below* `magno_only` despite the gate mostly favoring magno is the
+other honest wrinkle here: a small, partially-trusted contribution from a
+noisier pathway can net out to a slight loss rather than a gain — fusion
+isn't free, and this is what it looks like when the gate hasn't converged
+to something better than "mostly ignore the worse pathway."
+
+Reproduce with (after downloading GTSRB — see `benchmark_gtsrb.py`):
+
+```bash
+python benchmark_gtsrb.py  # trains the three models, writes gtsrb_results.json
+python plot_gtsrb.py       # renders assets/gtsrb_*.png from that json
+```
+
 ## Decision layer (optional): Jev
 
 The model's raw outputs aren't decisions: logits aren't calibrated
@@ -275,3 +319,5 @@ act on directly instead of hand-rolling threshold logic on logits.
 | `jev_decision.py` | Optional: turns model output into a calibrated action decision via Jev |
 | `benchmark.py` | Synthetic dataset + training run behind the Results section, reproducible |
 | `plot_results.py` | Renders `assets/*.png` from `benchmark.py`'s output |
+| `benchmark_gtsrb.py` | Same as `benchmark.py`, on a real GTSRB subset (needs a separate download) |
+| `plot_gtsrb.py` | Renders `assets/gtsrb_*.png` from `benchmark_gtsrb.py`'s output |
