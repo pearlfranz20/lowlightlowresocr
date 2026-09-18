@@ -42,6 +42,14 @@ lever found was reducing FLOPs (fewer channels/depth, smaller input), not
 attempted here since it trades directly against the accuracy this script
 exists to report.
 
+Saves model checkpoints to gtsrb_checkpoints/ after training (gitignored —
+regenerate by rerunning), and reports accuracy split by task group in
+addition to the overall number: DIGIT_ONLY_CLASS_IDS (the 8 speed-limit
+signs, which share shape/color and differ only by digits -- magno cannot
+resolve this at all, so this group specifically measures what parvo's fine
+detail buys you) vs. SHAPE_DISTINCT_CLASS_IDS (everything else, where
+coarse shape/color is enough).
+
 Run: python benchmark_gtsrb_full.py
 """
 
@@ -72,6 +80,17 @@ DEVICE = "cpu"
 NUM_CLASSES = 43
 MAX_TRAIN_PER_CLASS = 3000  # above every class's real max (2250) -> effectively uncapped
 FRAMES_PER_TRACK = 10
+CHECKPOINT_DIR = Path(__file__).parent / "gtsrb_checkpoints"
+
+# Speed-limit signs (20/30/50/60/70/80/100/120 km/h) share the same round
+# white/red-border shape and differ ONLY by digits -- magno structurally
+# cannot resolve this distinction (same reasoning as the synthetic
+# speed_25/45 pair and the 10-class GTSRB subset), so accuracy restricted
+# to this group specifically measures the task parvo is required for.
+# Class 6 ("end of speed limit 80") is excluded: it carries a diagonal
+# strike-through, a real shape difference, not a pure digit swap.
+DIGIT_ONLY_CLASS_IDS = {0, 1, 2, 3, 4, 5, 7, 8}
+SHAPE_DISTINCT_CLASS_IDS = set(range(NUM_CLASSES)) - DIGIT_ONLY_CLASS_IDS
 
 
 def _preprocess(img):
@@ -221,16 +240,24 @@ def train_epoch_clean(model, dataloader, optimizer, device, pathway_dropout_p=0.
 
 
 @torch.no_grad()
-def clean_accuracy(model, dataloader, device):
+def clean_accuracy(model, dataloader, device, class_ids=None):
+    """class_ids: if given, restrict scoring to samples whose true label is
+    in this set (e.g. DIGIT_ONLY_CLASS_IDS) -- everything else in the batch
+    is still run through the model (batches aren't rebuilt per group), just
+    not counted, so this is cheap to call multiple times per model."""
     model.eval()
     correct, total = 0, 0
     for gray_batch, color_batch, labels in dataloader:
         gray_batch, color_batch, labels = gray_batch.to(device), color_batch.to(device), labels.to(device)
         out = model(gray_batch, color_batch)
         logits = out[0] if isinstance(out, tuple) else out
-        correct += (logits.argmax(dim=1) == labels).sum().item()
+        preds = logits.argmax(dim=1)
+        if class_ids is not None:
+            mask = torch.tensor([l.item() in class_ids for l in labels])
+            preds, labels = preds[mask], labels[mask]
+        correct += (preds == labels).sum().item()
         total += labels.size(0)
-    return correct / total
+    return correct / total if total else float("nan")
 
 
 def main():
@@ -281,13 +308,28 @@ def main():
         print(f"  epoch {epoch + 1:2d} ({time.time() - t0:.0f}s, dropout_p={dropout_p:.3f}): "
               f"dual={l_dual:.3f}  parvo_only={l_parvo:.3f}  magno_only={l_magno:.3f}")
 
+    CHECKPOINT_DIR.mkdir(exist_ok=True)
+    torch.save(dual_model.state_dict(), CHECKPOINT_DIR / "dual_pathway.pt")
+    torch.save(parvo_model.state_dict(), CHECKPOINT_DIR / "parvo_only.pt")
+    torch.save(magno_model.state_dict(), CHECKPOINT_DIR / "magno_only.pt")
+    print(f"\nSaved checkpoints to {CHECKPOINT_DIR}/ (so future analysis doesn't need a full retrain)")
+
+    models = {"dual_pathway": dual_model, "parvo_only": parvo_model, "magno_only": magno_model}
+
     print("\nClean accuracy on the OFFICIAL GTSRB test set (12,630 images, 43 classes):")
-    acc_dual = clean_accuracy(dual_model, test_loader, DEVICE)
-    acc_parvo = clean_accuracy(parvo_model, test_loader, DEVICE)
-    acc_magno = clean_accuracy(magno_model, test_loader, DEVICE)
-    print(f"  dual_pathway: {acc_dual:.4f}")
-    print(f"  parvo_only:   {acc_parvo:.4f}")
-    print(f"  magno_only:   {acc_magno:.4f}")
+    overall = {name: clean_accuracy(m, test_loader, DEVICE) for name, m in models.items()}
+    for name, acc in overall.items():
+        print(f"  {name:14s}: {acc:.4f}")
+
+    # The task split that actually needs both pathways: speed-limit signs
+    # (digit-only, magno-blind) vs. everything else (shape-distinct,
+    # magno-sufficient) -- see DIGIT_ONLY_CLASS_IDS above.
+    print("\nAccuracy split by task group (does this task need parvo's fine detail?):")
+    digit_only = {name: clean_accuracy(m, test_loader, DEVICE, DIGIT_ONLY_CLASS_IDS) for name, m in models.items()}
+    shape_distinct = {name: clean_accuracy(m, test_loader, DEVICE, SHAPE_DISTINCT_CLASS_IDS) for name, m in models.items()}
+    print(f"  {'model':14s} {'digit-only (parvo-required)':>28s} {'shape-distinct (magno-sufficient)':>34s}")
+    for name in models:
+        print(f"  {name:14s} {digit_only[name]:>28.4f} {shape_distinct[name]:>34.4f}")
 
     with open("gtsrb_full_results.json", "w") as f:
         json.dump({
@@ -295,7 +337,9 @@ def main():
             "train_images": len(train_labs),
             "test_images": len(test_labs),
             "epochs": epochs,
-            "clean_accuracy": {"dual_pathway": acc_dual, "parvo_only": acc_parvo, "magno_only": acc_magno},
+            "clean_accuracy": overall,
+            "clean_accuracy_digit_only": digit_only,
+            "clean_accuracy_shape_distinct": shape_distinct,
         }, f, indent=2)
     print("\nWrote gtsrb_full_results.json")
 

@@ -297,7 +297,7 @@ Published reference points: human performance 98.84%, the original IJCNN
 2011 competition's winning entry 99.46%, current published SOTA 99.85%
 ([paperswithcode.com/sota/traffic-sign-recognition-on-gtsrb](https://paperswithcode.com/sota/traffic-sign-recognition-on-gtsrb),
 [Stallkamp et al., IJCNN 2011](https://www.ini.rub.de/upload/file/1470692848_f03494010c16c36bab9e/StallkampEtAl_GTSRB_IJCNN2011.pdf)).
-This repo lands at 91.0–95.4% (13,070 near-uncapped, augmented training
+This repo lands at 90.8–93.7% (13,070 near-uncapped, augmented training
 images — autocontrast, rotation, scale, translation, brightness/contrast
 jitter — 30 epochs, an LR schedule, weight decay, and a pathway-dropout
 rate that decays from 0.15 to 0.02 over training). Still a real gap from
@@ -308,24 +308,64 @@ dual-pathway/gating *mechanism*, not an accuracy-optimized traffic-sign
 classifier, but it's worth stating the gap plainly rather than only
 showing the corruption curves in isolation.
 
-`parvo_only` (95.4%) is consistently the strongest of the three on clean
-data here, ahead of `magno_only` (91.1%) and `dual_pathway` (91.0%):
-fusion's advantage in this repo is under degraded conditions (see the two
-sections above), not a free win on clean accuracy. Adding weight decay in
-this pass moved `parvo_only` and `magno_only` up slightly but
-`dual_pathway` down slightly (it briefly edged out `magno_only` in an
-earlier pass without weight decay, by 91.3% to 91.0% — a small enough
-margin either way that it's more "roughly tied" than a stable ordering).
-Small, mixed effects like this are the actual texture of tuning a real
-model — reported as observed rather than smoothed into a cleaner-sounding
-story.
+`parvo_only` (93.7%) and `dual_pathway` (93.4%) are close and consistently
+ahead of `magno_only` (90.8%) on clean data: fusion's advantage in this
+repo is under degraded conditions (see the two sections above), not a free
+win on clean accuracy. The exact ordering between `dual_pathway` and
+`magno_only` has flipped between runs (this repo's own re-runs have shown
+it both ways within about a point) — small, mixed effects like this are
+the actual texture of tuning a real model on a small toy dataset, reported
+as observed rather than smoothed into a cleaner-sounding story.
 
 Reproduce with (needs the official GTSRB test set too — see the script's
 docstring):
 
 ```bash
-python benchmark_gtsrb_full.py  # trains on all 43 classes, writes gtsrb_full_results.json
+python benchmark_gtsrb_full.py  # trains on all 43 classes, writes gtsrb_full_results.json + gtsrb_checkpoints/
 python plot_gtsrb_full.py       # renders assets/gtsrb_full_comparison.png
+```
+
+### Which tasks actually need both pathways?
+
+Plain classification doesn't force it — on most GTSRB classes, coarse
+shape/color alone (what `magno` sees) is already enough, which is why
+`magno_only` gets ~91% up above despite never seeing color or fine detail.
+The one place in this dataset built specifically to require parvo is the 8
+speed-limit signs (20/30/.../120 km/h): same round white/red-bordered
+shape and color, differing *only* by digits. Splitting test accuracy by
+that group vs. the other 35 shape-distinct classes gives a direct measure
+of which task actually needs which pathway, rather than inferring it from
+aggregate numbers:
+
+![Accuracy by task group](assets/gtsrb_task_groups.png)
+
+The honest result here is a negative one: `magno_only` scores **90.8% on
+both groups** — essentially identical. At its trained 16×16 resolution,
+magno isn't actually blind to the digit-only signs the way the shape
+argument predicts; some coarse ink-density/blob pattern about *which*
+digits are present survives downsampling enough for it to nearly match its
+performance everywhere else. (A quick, rougher check — re-evaluating the
+same trained checkpoint at 8×8 and 4×4 input without retraining — showed
+accuracy collapsing to single digits, but that's confounded by evaluating
+a model outside the resolution its BatchNorm statistics were trained on,
+not a clean measurement of information loss, so it's not reported as a
+real finding here, just a caveat on how far this result generalizes.)
+
+The practical upshot: within this repo's benchmarks, there isn't yet a
+clean task that structurally *requires* combining both pathways — every
+task tried so far turns out to be solvable by whichever single pathway
+happens to be stronger, given enough resolution. A genuinely
+fusion-necessary task would need a magno input coarse enough (retrained at
+that resolution, not just evaluated there) to truly lose the digit signal
+while a matching parvo signal remains available — this repo's synthetic
+benchmark data (`benchmark.py`) is easier to control for that than real
+photos and would be the more direct place to build one.
+
+Reproduce with (after `benchmark_gtsrb_full.py`, which writes the grouped
+numbers into `gtsrb_full_results.json`):
+
+```bash
+python plot_gtsrb_groups.py  # renders assets/gtsrb_task_groups.png
 ```
 
 ## Decision layer (optional): Jev
@@ -369,3 +409,4 @@ act on directly instead of hand-rolling threshold logic on logits.
 | `plot_gtsrb.py` | Renders `assets/gtsrb_*.png` from `benchmark_gtsrb.py`'s output |
 | `benchmark_gtsrb_full.py` | Full 43-class GTSRB, official test set, clean accuracy vs. published results |
 | `plot_gtsrb_full.py` | Renders `assets/gtsrb_full_comparison.png` from `benchmark_gtsrb_full.py`'s output |
+| `plot_gtsrb_groups.py` | Renders `assets/gtsrb_task_groups.png` (digit-only vs. shape-distinct accuracy) |
