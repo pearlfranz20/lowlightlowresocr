@@ -297,25 +297,28 @@ Published reference points: human performance 98.84%, the original IJCNN
 2011 competition's winning entry 99.46%, current published SOTA 99.85%
 ([paperswithcode.com/sota/traffic-sign-recognition-on-gtsrb](https://paperswithcode.com/sota/traffic-sign-recognition-on-gtsrb),
 [Stallkamp et al., IJCNN 2011](https://www.ini.rub.de/upload/file/1470692848_f03494010c16c36bab9e/StallkampEtAl_GTSRB_IJCNN2011.pdf)).
-This repo lands at 91.0–94.9% (13,070 near-uncapped, augmented training
+This repo lands at 91.0–95.4% (13,070 near-uncapped, augmented training
 images — autocontrast, rotation, scale, translation, brightness/contrast
-jitter — 30 epochs, an LR schedule, and a pathway-dropout rate that decays
-from 0.15 to 0.02 over training). Still a real gap from the literature's
-~35k images and heavy augmentation on tuned/ensembled architectures, but a
-big jump from the first pass (see below) — this was never intended to be
-competitive with SOTA, it's a lightweight scaffold for the dual-pathway/
-gating *mechanism*, not an accuracy-optimized traffic-sign classifier, but
-it's worth stating the gap plainly rather than only showing the corruption
-curves in isolation.
+jitter — 30 epochs, an LR schedule, weight decay, and a pathway-dropout
+rate that decays from 0.15 to 0.02 over training). Still a real gap from
+the literature's ~35k images and heavy augmentation on tuned/ensembled
+architectures, but a big jump from the first pass — this was never
+intended to be competitive with SOTA, it's a lightweight scaffold for the
+dual-pathway/gating *mechanism*, not an accuracy-optimized traffic-sign
+classifier, but it's worth stating the gap plainly rather than only
+showing the corruption curves in isolation.
 
-Also worth calling out: `dual_pathway` (91.3%) now edges out `magno_only`
-(91.0%) — it didn't before (83.6% vs. 84.3%) when pathway dropout was held
-at a fixed 0.15 the whole way through. Decaying it let the model spend
-early epochs learning pathway-robust features and later epochs mostly
-learning the fused representation, which is what closed that gap. It still
-trails `parvo_only` (94.9%): fusion's clearest advantage in this repo
-remains under degraded conditions (see the two sections above), not as a
-free win on clean accuracy.
+`parvo_only` (95.4%) is consistently the strongest of the three on clean
+data here, ahead of `magno_only` (91.1%) and `dual_pathway` (91.0%):
+fusion's advantage in this repo is under degraded conditions (see the two
+sections above), not a free win on clean accuracy. Adding weight decay in
+this pass moved `parvo_only` and `magno_only` up slightly but
+`dual_pathway` down slightly (it briefly edged out `magno_only` in an
+earlier pass without weight decay, by 91.3% to 91.0% — a small enough
+margin either way that it's more "roughly tied" than a stable ordering).
+Small, mixed effects like this are the actual texture of tuning a real
+model — reported as observed rather than smoothed into a cleaner-sounding
+story.
 
 Reproduce with (needs the official GTSRB test set too — see the script's
 docstring):
