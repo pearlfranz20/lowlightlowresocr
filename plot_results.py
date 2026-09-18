@@ -47,7 +47,8 @@ def _clean_axes(ax):
     ax.tick_params(length=0)
 
 
-def plot_severity_curve(results, out_path):
+def plot_severity_curve(results, out_path, title="Accuracy vs. corruption severity (held-out synthetic test set)",
+                         annotation=None):
     curve = results["severity_curve"]
     fig, ax = plt.subplots(figsize=(7, 4.5), dpi=200)
     _clean_axes(ax)
@@ -67,12 +68,12 @@ def plot_severity_curve(results, out_path):
     ax.set_ylim(0, 1.05)
     ax.yaxis.set_major_formatter(PercentFormatter(xmax=1.0))
     ax.set_xticks([0.0, 0.25, 0.5, 0.75, 1.0])
-    ax.set_title("Accuracy vs. corruption severity (held-out synthetic test set)",
-                 color=INK_PRIMARY, fontsize=12, loc="left", pad=12)
+    ax.set_title(title, color=INK_PRIMARY, fontsize=12, loc="left", pad=12)
     ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=3)
-    ax.annotate("dual_pathway and magno_only overlap exactly —\nthe gate collapsed onto magno (see gate-weight chart)",
-                xy=(0.5, 0.888), xytext=(0.04, 0.42), fontsize=9, color=INK_SECONDARY,
-                arrowprops=dict(arrowstyle="-", color=INK_MUTED, lw=1))
+    if annotation is not None:
+        text, xy, xytext = annotation
+        ax.annotate(text, xy=xy, xytext=xytext, fontsize=9, color=INK_SECONDARY,
+                    arrowprops=dict(arrowstyle="-", color=INK_MUTED, lw=1))
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
@@ -148,7 +149,12 @@ def main():
     with open("benchmark_results.json") as f:
         results = json.load(f)
 
-    plot_severity_curve(results, "assets/severity_curve.png")
+    plot_severity_curve(
+        results, "assets/severity_curve.png",
+        annotation=("dual_pathway and magno_only overlap exactly —\n"
+                    "the gate collapsed onto magno (see gate-weight chart)",
+                    (0.5, 0.888), (0.04, 0.42)),
+    )
     plot_gate_weights(results, "assets/gate_weights.png")
     plot_text_metrics(results, "assets/text_metrics.png")
     print("Wrote assets/severity_curve.png, assets/gate_weights.png, assets/text_metrics.png")
