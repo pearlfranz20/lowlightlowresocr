@@ -18,6 +18,10 @@ Requires: typesafe-sdk (`pip install typesafe-sdk`), TYPESAFE_API_KEY set.
 `decide()`/`decide_batch()` only need typesafe-sdk; `detect_read_and_decide()`
 additionally needs torch + the classifier, imported lazily so the rest of
 this module works without them installed.
+
+Batch decisions are independent per sample, so `decide_batch` fires them
+concurrently (via `AsyncTypeSafeClient`) instead of one-at-a-time — a batch
+of B samples takes roughly one call's latency, not B of them.
 """
 
 
@@ -30,6 +34,17 @@ def _get_client():
             "the TYPESAFE_API_KEY environment variable."
         )
     return TypeSafeClient()
+
+
+def _get_async_client():
+    try:
+        from typesafe_sdk import AsyncTypeSafeClient
+    except ImportError:
+        raise RuntimeError(
+            "typesafe-sdk not installed. `pip install typesafe-sdk`, and set "
+            "the TYPESAFE_API_KEY environment variable."
+        )
+    return AsyncTypeSafeClient()
 
 
 def build_state(class_name, class_prob, gate_weights, ocr_texts):
@@ -55,18 +70,11 @@ def build_state(class_name, class_prob, gate_weights, ocr_texts):
     return "\n".join(lines)
 
 
-def decide(class_name, class_prob, gate_weights, ocr_texts, client=None):
-    """
-    One combined Jev call: is the classification trustworthy, is the OCR
-    reading (if any) trustworthy, and what should downstream automation do.
-
-    Returns the raw typesafe_sdk response object — access via
-    response.answers["trust_classification"].noul, etc.
-    """
+def _build_questions(class_name, class_prob, gate_weights, ocr_texts):
+    """Shared by decide() and adecide(): builds the (state, questions) pair
+    for one combined Jev call — no I/O, so both the sync and async paths
+    stay in exact sync."""
     from typesafe_sdk import Choice, Noul
-
-    if client is None:
-        client = _get_client()
 
     state = build_state(class_name, class_prob, gate_weights, ocr_texts)
     has_ocr = any(ocr_texts)
@@ -95,33 +103,78 @@ def decide(class_name, class_prob, gate_weights, ocr_texts, client=None):
                          "is an accurate transcription, trustworthy enough "
                          "for downstream use.",
         )
+    return state, questions
 
+
+def decide(class_name, class_prob, gate_weights, ocr_texts, client=None):
+    """
+    One combined Jev call: is the classification trustworthy, is the OCR
+    reading (if any) trustworthy, and what should downstream automation do.
+
+    Returns the raw typesafe_sdk response object — access via
+    response.answers["trust_classification"].noul, etc.
+    """
+    if client is None:
+        client = _get_client()
+    state, questions = _build_questions(class_name, class_prob, gate_weights, ocr_texts)
     return client.system_one(state=state, questions=questions)
 
 
-def decide_batch(class_names, logits, gate_weights, texts_per_sample, client=None):
-    """
-    Batched version. class_names: list mapping class index -> label.
-    logits: (B, num_classes). gate_weights: (B, 2). texts_per_sample: list
-    of length B, each a list of strings (from detect_and_read_text).
+async def adecide(class_name, class_prob, gate_weights, ocr_texts, client=None):
+    """Async version of decide() — same call, non-blocking, so many of these
+    can run concurrently under asyncio.gather instead of one at a time."""
+    if client is None:
+        client = _get_async_client()
+    state, questions = _build_questions(class_name, class_prob, gate_weights, ocr_texts)
+    return await client.system_one(state=state, questions=questions)
 
-    Returns a list of length B of Jev responses, one per sample.
+
+async def adecide_batch(class_names, logits, gate_weights, texts_per_sample, client=None):
     """
+    Async batched version — fires all B per-sample Jev calls concurrently
+    instead of sequentially. Each sample's decision is independent, so wall
+    time is roughly one call's latency rather than B of them.
+
+    class_names: list mapping class index -> label. logits: (B, num_classes).
+    gate_weights: (B, 2). texts_per_sample: list of length B, each a list of
+    strings (from detect_and_read_text).
+
+    Returns a list of length B of Jev responses, one per sample, in order.
+    """
+    import asyncio
     import torch
 
     if client is None:
-        client = _get_client()
+        client = _get_async_client()
 
     probs = torch.softmax(logits, dim=1)
     top_prob, top_idx = probs.max(dim=1)
 
-    results = []
+    calls = []
     for i in range(logits.shape[0]):
         class_name = class_names[top_idx[i].item()]
         class_prob = top_prob[i].item()
         gw = (gate_weights[i, 0].item(), gate_weights[i, 1].item())
-        results.append(decide(class_name, class_prob, gw, texts_per_sample[i], client=client))
-    return results
+        calls.append(adecide(class_name, class_prob, gw, texts_per_sample[i], client=client))
+    return await asyncio.gather(*calls)
+
+
+def decide_batch(class_names, logits, gate_weights, texts_per_sample, client=None):
+    """
+    Sync convenience wrapper around adecide_batch — same signature and
+    return value as before, but the underlying calls now run concurrently.
+    `client`, if given, must be an AsyncTypeSafeClient (a plain sync
+    TypeSafeClient won't work here; pass None to let it build one).
+
+    Only usable outside a running event loop (plain scripts, notebooks
+    without an active loop). If you're already in async code, call
+    `await adecide_batch(...)` directly instead.
+    """
+    import asyncio
+
+    return asyncio.run(
+        adecide_batch(class_names, logits, gate_weights, texts_per_sample, client=client)
+    )
 
 
 def detect_read_and_decide(model, gray_lowres, color_highres, class_names,
