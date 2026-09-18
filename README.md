@@ -95,12 +95,14 @@ loss = train_one_epoch(model, dataloader, optimizer, device="cpu")
   over all activated pixels without it)
 - `pytesseract` + the `tesseract-ocr` system binary, **or** `easyocr`
   (optional — only needed for `ocr_read_regions` / `detect_and_read_text`)
+- `typesafe-sdk` (optional — only needed for `jev_decision.py`)
 
 ```bash
 pip install torch scipy
 pip install pytesseract        # + apt install tesseract-ocr (or your OS equivalent)
 # or
 pip install easyocr
+pip install typesafe-sdk       # optional, for the Jev decision layer
 ```
 
 ## Evaluation
@@ -175,9 +177,38 @@ For a more rigorous comparison than your own held-out set:
 - Box extraction without `scipy` is a coarse single-box fallback — fine for
   one sign in frame, not for scenes with multiple separated text regions.
 
+## Decision layer (optional): Jev
+
+The model's raw outputs aren't decisions: logits aren't calibrated
+probabilities, gate weights don't say whether to trust the call, and OCR
+text comes with no confidence signal at all. `jev_decision.py` packs those
+three signals (predicted class + confidence, magno/parvo gate weighting,
+OCR text) into a single call to [Jev](https://typesafe.ai) — TypeSafe AI's
+System One model — and gets back one calibrated, type-safe decision:
+whether the classification is trustworthy, whether the OCR reading is
+trustworthy, and what downstream automation should actually do
+(`act` / `flag_for_review` / `discard`).
+
+```python
+from jev_decision import detect_read_and_decide
+
+class_names = ["stop", "yield", "speed_limit", ...]
+logits, gate_weights, texts, jev_decisions = detect_read_and_decide(
+    model, gray, color, class_names, engine="tesseract",
+)
+for d in jev_decisions:
+    print(d.answers["action"].choice, d.answers["trust_classification"].noul)
+```
+
+Requires `pip install typesafe-sdk` and a `TYPESAFE_API_KEY` environment
+variable. This is entirely optional — everything else in this repo works
+without it; it just turns raw model output into something a pipeline can
+act on directly instead of hand-rolling threshold logic on logits.
+
 ## File overview
 
 | File | Contents |
 |---|---|
 | `dual_pathway_classifier.py` | Full model, fusion, text head, OCR integration, training loop |
 | `evaluate.py` | Baselines, degradation-curve metrics, text-detection metrics, OCR comparison |
+| `jev_decision.py` | Optional: turns model output into a calibrated action decision via Jev |
