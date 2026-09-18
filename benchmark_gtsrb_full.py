@@ -25,7 +25,22 @@ pathway-robust features (per the README's documented rationale for pathway
 dropout) and later epochs mostly learning the actual fused representation,
 rather than fighting a fixed, fairly high dropout rate the whole way
 through on a clean-accuracy target where a pathway going fully missing
-never happens at eval time.
+never happens at eval time. weight_decay=1e-4 on all three optimizers was
+added in the same pass, since parvo_only's train loss was reaching
+~0.003-0.006 while test accuracy sat well below that — a real train/test
+gap worth addressing directly rather than just training longer.
+
+Speed notes, so this isn't re-investigated from scratch: this workload is
+genuinely compute-bound on CPU, not overhead-bound. Precomputing the
+magno grayscale/downsample transform once per batch instead of redoing it
+every epoch (this repo's own prior inefficiency) made ~no measurable
+difference; neither did batch size (tried 32/64/128/256, all within noise
+of each other). `torch.compile(model)` hung indefinitely (400s+, never
+completed) on this Windows/CPU setup, likely missing the C++ toolchain its
+CPU (Inductor) backend needs — did not investigate further. The one real
+lever found was reducing FLOPs (fewer channels/depth, smaller input), not
+attempted here since it trades directly against the accuracy this script
+exists to report.
 
 Run: python benchmark_gtsrb_full.py
 """
@@ -170,13 +185,25 @@ def _clean_inputs(color_imgs, magno_size=16):
     return gray, color_imgs
 
 
+def make_batches(imgs, labs, batch_size=32):
+    """Precomputes gray/color inputs once per batch here, rather than
+    recomputing the same deterministic luminance+downsample transform from
+    scratch on every batch of every epoch in the training loop (30 epochs
+    of pure waste on an input that never changes in this clean-accuracy
+    run). Bit-identical results, just not redone ~12k extra times."""
+    batches = []
+    for i in range(0, len(labs), batch_size):
+        gray_batch, color_batch = _clean_inputs(imgs[i:i + batch_size])
+        batches.append((gray_batch, color_batch, labs[i:i + batch_size]))
+    return batches
+
+
 def train_epoch_clean(model, dataloader, optimizer, device, pathway_dropout_p=0.0):
     model.train()
     criterion = nn.CrossEntropyLoss()
     total_loss = 0.0
-    for color_imgs, labels, _ in dataloader:
-        color_imgs, labels = color_imgs.to(device), labels.to(device)
-        gray_batch, color_batch = _clean_inputs(color_imgs)
+    for gray_batch, color_batch, labels in dataloader:
+        gray_batch, color_batch, labels = gray_batch.to(device), color_batch.to(device), labels.to(device)
 
         r = random.random()
         if r < pathway_dropout_p / 2:
@@ -193,21 +220,13 @@ def train_epoch_clean(model, dataloader, optimizer, device, pathway_dropout_p=0.
     return total_loss / len(dataloader)
 
 
-def make_batches(imgs, labs, batch_size=32):
-    dummy_mask = torch.zeros(1, 1, IMG_SIZE, IMG_SIZE)
-    return [(imgs[i:i + batch_size], labs[i:i + batch_size],
-              dummy_mask.expand(imgs[i:i + batch_size].shape[0], -1, -1, -1))
-            for i in range(0, len(labs), batch_size)]
-
-
 @torch.no_grad()
 def clean_accuracy(model, dataloader, device):
     model.eval()
     correct, total = 0, 0
-    for color_imgs, labels, _ in dataloader:
-        color_imgs, labels = color_imgs.to(device), labels.to(device)
-        gray, color_imgs = _clean_inputs(color_imgs)
-        out = model(gray, color_imgs)
+    for gray_batch, color_batch, labels in dataloader:
+        gray_batch, color_batch, labels = gray_batch.to(device), color_batch.to(device), labels.to(device)
+        out = model(gray_batch, color_batch)
         logits = out[0] if isinstance(out, tuple) else out
         correct += (logits.argmax(dim=1) == labels).sum().item()
         total += labels.size(0)
@@ -235,9 +254,14 @@ def main():
     parvo_model = ParvoOnlyClassifier(num_classes=NUM_CLASSES).to(DEVICE)
     magno_model = MagnoOnlyClassifier(num_classes=NUM_CLASSES).to(DEVICE)
 
-    opt_dual = Adam(dual_model.parameters(), lr=1e-3)
-    opt_parvo = Adam(parvo_model.parameters(), lr=1e-3)
-    opt_magno = Adam(magno_model.parameters(), lr=1e-3)
+    # weight_decay added this pass: parvo_only's train loss was reaching
+    # ~0.003-0.006 while test accuracy sat at 94.9% -- a real train/test
+    # gap (overfitting), and none of the three optimizers used any L2
+    # regularization before now.
+    WEIGHT_DECAY = 1e-4
+    opt_dual = Adam(dual_model.parameters(), lr=1e-3, weight_decay=WEIGHT_DECAY)
+    opt_parvo = Adam(parvo_model.parameters(), lr=1e-3, weight_decay=WEIGHT_DECAY)
+    opt_magno = Adam(magno_model.parameters(), lr=1e-3, weight_decay=WEIGHT_DECAY)
     sched_dual = StepLR(opt_dual, step_size=10, gamma=0.5)
     sched_parvo = StepLR(opt_parvo, step_size=10, gamma=0.5)
     sched_magno = StepLR(opt_magno, step_size=10, gamma=0.5)
