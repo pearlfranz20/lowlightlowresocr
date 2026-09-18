@@ -1,0 +1,11 @@
+{
+  "num_classes": 43,
+  "train_images": 13070,
+  "test_images": 12630,
+  "epochs": 30,
+  "clean_accuracy": {
+    "dual_pathway": 0.9129849564528899,
+    "parvo_only": 0.9486935866983373,
+    "magno_only": 0.9095803642121932
+  }
+}

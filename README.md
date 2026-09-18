@@ -282,6 +282,49 @@ python benchmark_gtsrb.py  # trains the three models, writes gtsrb_results.json
 python plot_gtsrb.py       # renders assets/gtsrb_*.png from that json
 ```
 
+### How this compares to published GTSRB results
+
+The two results above train under this repo's own corruption-severity
+sweep, which isn't the standard benchmark protocol and isn't a fair
+comparison point against the literature. `benchmark_gtsrb_full.py` is the
+apples-to-apples version: all 43 classes, evaluated for clean accuracy only
+(no corruption) on the **official** 12,630-image GTSRB test set — the same
+number the literature reports.
+
+![This repo vs. published GTSRB results](assets/gtsrb_full_comparison.png)
+
+Published reference points: human performance 98.84%, the original IJCNN
+2011 competition's winning entry 99.46%, current published SOTA 99.85%
+([paperswithcode.com/sota/traffic-sign-recognition-on-gtsrb](https://paperswithcode.com/sota/traffic-sign-recognition-on-gtsrb),
+[Stallkamp et al., IJCNN 2011](https://www.ini.rub.de/upload/file/1470692848_f03494010c16c36bab9e/StallkampEtAl_GTSRB_IJCNN2011.pdf)).
+This repo lands at 91.0–94.9% (13,070 near-uncapped, augmented training
+images — autocontrast, rotation, scale, translation, brightness/contrast
+jitter — 30 epochs, an LR schedule, and a pathway-dropout rate that decays
+from 0.15 to 0.02 over training). Still a real gap from the literature's
+~35k images and heavy augmentation on tuned/ensembled architectures, but a
+big jump from the first pass (see below) — this was never intended to be
+competitive with SOTA, it's a lightweight scaffold for the dual-pathway/
+gating *mechanism*, not an accuracy-optimized traffic-sign classifier, but
+it's worth stating the gap plainly rather than only showing the corruption
+curves in isolation.
+
+Also worth calling out: `dual_pathway` (91.3%) now edges out `magno_only`
+(91.0%) — it didn't before (83.6% vs. 84.3%) when pathway dropout was held
+at a fixed 0.15 the whole way through. Decaying it let the model spend
+early epochs learning pathway-robust features and later epochs mostly
+learning the fused representation, which is what closed that gap. It still
+trails `parvo_only` (94.9%): fusion's clearest advantage in this repo
+remains under degraded conditions (see the two sections above), not as a
+free win on clean accuracy.
+
+Reproduce with (needs the official GTSRB test set too — see the script's
+docstring):
+
+```bash
+python benchmark_gtsrb_full.py  # trains on all 43 classes, writes gtsrb_full_results.json
+python plot_gtsrb_full.py       # renders assets/gtsrb_full_comparison.png
+```
+
 ## Decision layer (optional): Jev
 
 The model's raw outputs aren't decisions: logits aren't calibrated
@@ -321,3 +364,5 @@ act on directly instead of hand-rolling threshold logic on logits.
 | `plot_results.py` | Renders `assets/*.png` from `benchmark.py`'s output |
 | `benchmark_gtsrb.py` | Same as `benchmark.py`, on a real GTSRB subset (needs a separate download) |
 | `plot_gtsrb.py` | Renders `assets/gtsrb_*.png` from `benchmark_gtsrb.py`'s output |
+| `benchmark_gtsrb_full.py` | Full 43-class GTSRB, official test set, clean accuracy vs. published results |
+| `plot_gtsrb_full.py` | Renders `assets/gtsrb_full_comparison.png` from `benchmark_gtsrb_full.py`'s output |
