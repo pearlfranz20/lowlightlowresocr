@@ -4,8 +4,18 @@
   "test_images": 12630,
   "epochs": 30,
   "clean_accuracy": {
-    "dual_pathway": 0.910055423594616,
-    "parvo_only": 0.9543942992874109,
-    "magno_only": 0.9113222486144101
+    "dual_pathway": 0.9339667458432304,
+    "parvo_only": 0.9365795724465559,
+    "magno_only": 0.9079968329374505
+  },
+  "clean_accuracy_digit_only": {
+    "dual_pathway": 0.9306954436450839,
+    "parvo_only": 0.9347721822541967,
+    "magno_only": 0.9083932853717026
+  },
+  "clean_accuracy_shape_distinct": {
+    "dual_pathway": 0.9355791962174941,
+    "parvo_only": 0.9374704491725768,
+    "magno_only": 0.9078014184397163
   }
 }
