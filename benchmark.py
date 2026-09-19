@@ -27,6 +27,11 @@ This is a toy benchmark meant to demonstrate the architecture's intended
 behavior (graceful degradation, gate shifting, text localization), not a
 claim about real-world sign/text performance — see the README caveat.
 
+Also runs a second, separate experiment (run_fusion_necessary_experiment):
+a task built so that neither pathway alone can do well, unlike the
+severity sweep above where fusion only ever turned out to be *sometimes*
+helpful. See that function's docstring/comments for the construction.
+
 Run: python benchmark.py
 """
 
@@ -291,6 +296,132 @@ def avg_text_metrics(model, dataloader, device, severity):
     return {k: sum(m[k] for m in all_metrics) / len(all_metrics) for k in all_metrics[0]}
 
 
+# --------------------------------------------------------------------------
+# Fusion-necessary task: unlike the severity sweep above (which showed
+# fusion is *sometimes helpful* under corruption but never *required* —
+# every task tried always turned out solvable by whichever single pathway
+# was stronger, per the GTSRB README section on this), this constructs a
+# task where NEITHER pathway alone can do well, by design.
+#
+# Every sample gets exactly one whole pathway zeroed, chosen independently
+# per sample (~50/50) — not blur, not partial noise, a hard per-sample
+# either/or ("half your shots come from a color camera with a dead color
+# sensor, half from a mono-only camera"). A single-pathway model can only
+# ever succeed on the ~half of samples where ITS pathway happens to be the
+# survivor; only a model that can detect which pathway is live per sample
+# and route to it can do well across the whole set. This is exactly what
+# GatedFusion is for (a per-sample, not global, weighting) — this task is
+# built specifically to need that.
+# --------------------------------------------------------------------------
+def zero_one_pathway_batch(gray_batch, color_batch):
+    keep_gray = torch.rand(gray_batch.shape[0], device=gray_batch.device) < 0.5
+    gray_out = gray_batch * keep_gray.view(-1, 1, 1, 1)
+    color_out = color_batch * (~keep_gray).view(-1, 1, 1, 1)
+    return gray_out, color_out
+
+
+def train_fusion_necessary_epoch(model, dataloader, optimizer, device, text_mask_weight=2.0):
+    """Trains DualPathwayClassifier under the always-one-pathway-missing
+    regime. Ordinary pathway dropout (a *fraction* of batches) isn't
+    frequent enough exposure for the gate to learn a reliable per-sample
+    detect-and-route policy — this task needs it on every sample."""
+    model.train()
+    cls_criterion = nn.CrossEntropyLoss()
+    mask_criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(15.0, device=device))
+    total_loss = 0.0
+    for color_imgs, labels, text_masks in dataloader:
+        color_imgs, labels, text_masks = color_imgs.to(device), labels.to(device), text_masks.to(device)
+        gray_batch, color_batch = _batch_inputs(color_imgs, lambda: 0.0)  # clean, pre-zeroing
+        gray_batch, color_batch = gray_batch.to(device), color_batch.to(device)
+        gray_batch, color_batch = zero_one_pathway_batch(gray_batch, color_batch)
+
+        optimizer.zero_grad()
+        logits, pred_mask = model(gray_batch, color_batch, return_text_mask=True)
+        loss = cls_criterion(logits, labels) + text_mask_weight * mask_criterion(pred_mask, text_masks)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    return total_loss / len(dataloader)
+
+
+def train_baseline_clean_epoch(model, dataloader, optimizer, device):
+    """Single-pathway baselines for the fusion-necessary task are trained
+    on clean data only, not exposed to zeroed input during training —
+    realistic framing: a single-sensor system is trained on good data for
+    its one sensor, then just happens to lose signal sometimes at
+    deployment/test time. (If you knew in advance when your one sensor
+    would fail, you'd just use a different sensor.)"""
+    model.train()
+    criterion = nn.CrossEntropyLoss()
+    total_loss = 0.0
+    for color_imgs, labels, _ in dataloader:
+        color_imgs, labels = color_imgs.to(device), labels.to(device)
+        gray_batch, color_batch = _batch_inputs(color_imgs, lambda: 0.0)
+        gray_batch, color_batch = gray_batch.to(device), color_batch.to(device)
+
+        optimizer.zero_grad()
+        logits = model(gray_batch, color_batch)
+        loss = criterion(logits, labels)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    return total_loss / len(dataloader)
+
+
+@torch.no_grad()
+def evaluate_fusion_necessary(model, dataloader, device, n_trials=5):
+    """Accuracy under the same one-pathway-always-missing regime. n_trials
+    repeats the random per-sample zeroing draw and averages, since a single
+    draw is noisy (~half the test set is arbitrary per draw)."""
+    model.eval()
+    accs = []
+    for _ in range(n_trials):
+        correct, total = 0, 0
+        for color_imgs, labels, _ in dataloader:
+            color_imgs, labels = color_imgs.to(device), labels.to(device)
+            gray_batch, color_batch = _batch_inputs(color_imgs, lambda: 0.0)
+            gray_batch, color_batch = gray_batch.to(device), color_batch.to(device)
+            gray_batch, color_batch = zero_one_pathway_batch(gray_batch, color_batch)
+            out = model(gray_batch, color_batch)
+            logits = out[0] if isinstance(out, tuple) else out
+            correct += (logits.argmax(dim=1) == labels).sum().item()
+            total += labels.size(0)
+        accs.append(correct / total if total else float("nan"))
+    return sum(accs) / len(accs)
+
+
+def run_fusion_necessary_experiment(train_loader, test_loader, num_classes, epochs=22):
+    print(f"\n{'=' * 70}\nFusion-necessary task: every sample has exactly one pathway zeroed\n{'=' * 70}")
+    dual_model = DualPathwayClassifier(num_classes=num_classes, with_text_head=True).to(DEVICE)
+    parvo_model = ParvoOnlyClassifier(num_classes=num_classes).to(DEVICE)
+    magno_model = MagnoOnlyClassifier(num_classes=num_classes).to(DEVICE)
+
+    opt_dual = Adam(dual_model.parameters(), lr=1e-3)
+    opt_parvo = Adam(parvo_model.parameters(), lr=1e-3)
+    opt_magno = Adam(magno_model.parameters(), lr=1e-3)
+
+    print(f"Training for {epochs} epochs...")
+    for epoch in range(epochs):
+        l_dual = train_fusion_necessary_epoch(dual_model, train_loader, opt_dual, DEVICE)
+        l_parvo = train_baseline_clean_epoch(parvo_model, train_loader, opt_parvo, DEVICE)
+        l_magno = train_baseline_clean_epoch(magno_model, train_loader, opt_magno, DEVICE)
+        print(f"  epoch {epoch + 1:2d}: dual={l_dual:.3f}  parvo_only={l_parvo:.3f}  magno_only={l_magno:.3f}")
+
+    print("\nAccuracy with one pathway always missing (averaged over 5 random draws):")
+    results = {
+        "dual_pathway": evaluate_fusion_necessary(dual_model, test_loader, DEVICE),
+        "parvo_only": evaluate_fusion_necessary(parvo_model, test_loader, DEVICE),
+        "magno_only": evaluate_fusion_necessary(magno_model, test_loader, DEVICE),
+    }
+    for name, acc in results.items():
+        print(f"  {name:14s}: {acc:.4f}")
+
+    with open("fusion_necessary_results.json", "w") as f:
+        json.dump({"num_classes": num_classes, "epochs": epochs, "accuracy": results}, f, indent=2)
+    print("\nWrote fusion_necessary_results.json")
+    return results
+
+
 def main():
     num_classes = len(CLASSES)
     print("Building synthetic dataset...")
@@ -345,6 +476,8 @@ def main():
             "text_metrics": {"clean": tm_clean, "degraded": tm_degraded},
         }, f, indent=2)
     print("\nWrote benchmark_results.json")
+
+    run_fusion_necessary_experiment(train_loader, test_loader, num_classes)
 
 
 if __name__ == "__main__":

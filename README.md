@@ -238,6 +238,47 @@ python benchmark.py    # trains the three models, writes benchmark_results.json
 python plot_results.py # renders assets/*.png from that json
 ```
 
+### A task neither pathway can solve alone
+
+Everything above shows fusion being *sometimes helpful* under corruption —
+never *required*. Every task tried so far (including the GTSRB digit-only
+group below) turned out solvable by whichever single pathway happened to
+be stronger, given enough resolution. This section builds the task the
+GTSRB write-up below points at: one specifically constructed so neither
+pathway can do well alone.
+
+Construction: every sample gets exactly one whole pathway zeroed, chosen
+independently per sample (~50/50) — not blur, not partial noise, a hard
+per-sample either/or (something like "half your shots come from a color
+camera with a dead color sensor, half from a mono-only camera with signal
+dropout"). `benchmark.py` runs this as a second experiment after the one
+above, training a fresh `DualPathwayClassifier` under this always-one-
+pathway-missing regime (ordinary pathway dropout — a *fraction* of
+batches — isn't frequent enough exposure for the gate to learn a reliable
+per-sample detect-and-route policy) and fresh `ParvoOnlyClassifier`/
+`MagnoOnlyClassifier` baselines trained normally on clean data (the
+realistic framing: a single-sensor system is trained on good data for its
+one sensor, then just happens to lose signal sometimes at deployment — if
+you knew in advance when your one sensor would fail, you'd use a different
+sensor).
+
+![A task neither pathway can solve alone](assets/fusion_necessary.png)
+
+This is the clean, decisive result the sections above don't produce:
+`dual_pathway` reaches 81.7%, far above both `parvo_only` (52.4%) and
+`magno_only` (50.8%), which each cap out near 50% — roughly what you'd
+expect from "do well on the ~half of samples where your one pathway
+happens to survive, and have literally nothing on the other half." Only a
+model that can detect which pathway is live per sample and route to it
+beats that ceiling, which is exactly what `GatedFusion`'s per-sample (not
+global) weighting is built to do.
+
+Reproduce with (runs automatically as part of `python benchmark.py`):
+
+```bash
+python plot_fusion_necessary.py  # renders assets/fusion_necessary.png from fusion_necessary_results.json
+```
+
 ## Results (real data: GTSRB subset)
 
 Same setup, real photographs this time — a 10-class subset of
@@ -351,15 +392,15 @@ a model outside the resolution its BatchNorm statistics were trained on,
 not a clean measurement of information loss, so it's not reported as a
 real finding here, just a caveat on how far this result generalizes.)
 
-The practical upshot: within this repo's benchmarks, there isn't yet a
-clean task that structurally *requires* combining both pathways — every
-task tried so far turns out to be solvable by whichever single pathway
-happens to be stronger, given enough resolution. A genuinely
-fusion-necessary task would need a magno input coarse enough (retrained at
-that resolution, not just evaluated there) to truly lose the digit signal
-while a matching parvo signal remains available — this repo's synthetic
-benchmark data (`benchmark.py`) is easier to control for that than real
-photos and would be the more direct place to build one.
+The practical upshot: within GTSRB, there isn't a clean task that
+structurally *requires* combining both pathways — every task tried here
+turns out to be solvable by whichever single pathway happens to be
+stronger, given enough resolution. Building one that actually forces
+fusion turned out to be more reliable by construction than by finding the
+right class split — see [A task neither pathway can solve alone](#a-task-neither-pathway-can-solve-alone)
+in `benchmark.py`'s results above, which sidesteps the resolution-confound
+problem entirely (no retraining-at-different-resolutions needed) by
+directly controlling which pathway has signal, per sample.
 
 Reproduce with (after `benchmark_gtsrb_full.py`, which writes the grouped
 numbers into `gtsrb_full_results.json`):
@@ -405,6 +446,7 @@ act on directly instead of hand-rolling threshold logic on logits.
 | `jev_decision.py` | Optional: turns model output into a calibrated action decision via Jev |
 | `benchmark.py` | Synthetic dataset + training run behind the Results section, reproducible |
 | `plot_results.py` | Renders `assets/*.png` from `benchmark.py`'s output |
+| `plot_fusion_necessary.py` | Renders `assets/fusion_necessary.png` (the neither-pathway-alone task) |
 | `benchmark_gtsrb.py` | Same as `benchmark.py`, on a real GTSRB subset (needs a separate download) |
 | `plot_gtsrb.py` | Renders `assets/gtsrb_*.png` from `benchmark_gtsrb.py`'s output |
 | `benchmark_gtsrb_full.py` | Full 43-class GTSRB, official test set, clean accuracy vs. published results |
