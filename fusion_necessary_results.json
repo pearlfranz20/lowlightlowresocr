@@ -1,0 +1,9 @@
+{
+  "num_classes": 5,
+  "epochs": 22,
+  "accuracy": {
+    "dual_pathway": 0.8168,
+    "parvo_only": 0.524,
+    "magno_only": 0.508
+  }
+}

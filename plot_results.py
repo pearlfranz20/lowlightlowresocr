@@ -149,11 +149,16 @@ def main():
     with open("benchmark_results.json") as f:
         results = json.load(f)
 
+    curve = results["severity_curve"]
+    dual_mid = curve["dual_pathway"]["0.5"]
+    magno_mid = curve["magno_only"]["0.5"]
+    gap = abs(dual_mid - magno_mid)
+    relation = "overlap exactly" if gap < 0.005 else f"track closely ({gap:.1%} apart)"
     plot_severity_curve(
         results, "assets/severity_curve.png",
-        annotation=("dual_pathway and magno_only overlap exactly —\n"
-                    "the gate collapsed onto magno (see gate-weight chart)",
-                    (0.5, 0.888), (0.04, 0.42)),
+        annotation=(f"dual_pathway and magno_only {relation} —\n"
+                    "the gate leans heavily toward magno (see gate-weight chart)",
+                    (0.5, magno_mid), (0.04, magno_mid - 0.46)),
     )
     plot_gate_weights(results, "assets/gate_weights.png")
     plot_text_metrics(results, "assets/text_metrics.png")
