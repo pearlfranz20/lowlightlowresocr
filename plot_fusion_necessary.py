@@ -7,7 +7,7 @@ import json
 
 import matplotlib.pyplot as plt
 
-from plot_results import AQUA, BASELINE, BLUE, INK_MUTED, INK_PRIMARY, INK_SECONDARY, ORANGE, _clean_axes
+from plot_results import AQUA, BASELINE, BLUE, INK_MUTED, INK_PRIMARY, INK_SECONDARY, ORANGE, PURPLE, _clean_axes
 
 
 def main():
@@ -15,11 +15,13 @@ def main():
         results = json.load(f)
     acc = results["accuracy"]
 
-    bars = [("dual_pathway", acc["dual_pathway"], BLUE),
-            ("parvo_only", acc["parvo_only"], ORANGE),
-            ("magno_only", acc["magno_only"], AQUA)]
+    bars = [("dual_pathway", acc["dual_pathway"], BLUE)]
+    if "dual_pathway_lateral" in acc:
+        bars.append(("dual_pathway_lateral", acc["dual_pathway_lateral"], PURPLE))
+    bars += [("parvo_only", acc["parvo_only"], ORANGE),
+             ("magno_only", acc["magno_only"], AQUA)]
 
-    fig, ax = plt.subplots(figsize=(6.5, 4.8), dpi=200)
+    fig, ax = plt.subplots(figsize=(6.5 + 1.3 * max(0, len(bars) - 3), 4.8), dpi=200)
     _clean_axes(ax)
 
     xs = range(len(bars))
@@ -28,7 +30,8 @@ def main():
         ax.text(x, val + 0.02, f"{val:.1%}", ha="center", fontsize=11, color=INK_SECONDARY)
 
     ax.axhline(0.5, color=BASELINE, linewidth=1, linestyle=(0, (2, 2)), zorder=2)
-    ax.text(2.35, 0.505, "~chance ceiling for a\nsingle pathway here", fontsize=8, color=INK_MUTED, va="bottom")
+    ax.text(0.5, 0.47, "~chance ceiling for a\nsingle pathway here",
+            fontsize=8, color=INK_MUTED, va="top", ha="center")
 
     ax.set_xticks(list(xs))
     ax.set_xticklabels([b[0] for b in bars], fontsize=10.5)

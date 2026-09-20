@@ -29,7 +29,10 @@ import torch.nn.functional as F
 class MagnoStream(nn.Module):
     def __init__(self, in_channels=1, feat_dim=128):
         super().__init__()
-        self.net = nn.Sequential(
+        # split into conv trunk + pool, mirroring ParvoStream, so a lateral
+        # connection (see LateralParvoStream) can tap the pre-pool spatial
+        # map instead of only the final pooled vector.
+        self.conv = nn.Sequential(
             nn.Conv2d(in_channels, 32, kernel_size=7, stride=4, padding=3),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
@@ -39,11 +42,18 @@ class MagnoStream(nn.Module):
             nn.Conv2d(64, feat_dim, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(feat_dim),
             nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d(1),
         )
+        self.pool = nn.AdaptiveAvgPool2d(1)
 
     def forward(self, x):
-        return self.net(x).flatten(1)
+        return self.pool(self.conv(x)).flatten(1)
+
+    def forward_spatial(self, x):
+        """Pre-pool spatial feature map (B, feat_dim, H', W') — small (e.g.
+        2x2 for a 32x32 input, given stride 4*2*2=16), but that's fine for a
+        lateral connection: it's broadcasting coarse whole-image context,
+        not fine spatial detail."""
+        return self.conv(x)
 
 
 # --------------------------------------------------------------------------
@@ -304,6 +314,94 @@ class DualPathwayClassifier(nn.Module):
         else:
             p_feat = self.parvo(color_highres)
             text_mask = None
+
+        fused, gate_weights = self.fusion(m_feat, p_feat)
+        logits = self.classifier(fused)
+
+        out = [logits]
+        if return_gate:
+            out.append(gate_weights)
+        if return_text_mask:
+            out.append(text_mask)
+        return tuple(out) if len(out) > 1 else out[0]
+
+
+# --------------------------------------------------------------------------
+# Lateral connection: magno -> parvo mid-trunk, instead of only meeting at
+# the final gated fusion. Same idea as SlowFast's lateral connections for
+# video (fast pathway fed into slow pathway at each stage) applied to this
+# magno/parvo split — magno's coarse, cheap, whole-image context gets
+# broadcast into parvo's intermediate feature map, so parvo starts its
+# fine-detail processing with a global prior instead of building one up
+# from scratch. This is additive to the existing late gate fusion, not a
+# replacement for it.
+# --------------------------------------------------------------------------
+class LateralParvoStream(nn.Module):
+    """Same conv trunk as ParvoStream, but forward_spatial takes magno's
+    spatial feature map and injects it (1x1-projected, resized to match)
+    right after the first downsampling block."""
+
+    def __init__(self, in_channels=3, feat_dim=256, lateral_dim=128):
+        super().__init__()
+
+        def block(c_in, c_out, stride=1):
+            return nn.Sequential(
+                nn.Conv2d(c_in, c_out, kernel_size=3, stride=stride, padding=1),
+                nn.BatchNorm2d(c_out),
+                nn.ReLU(inplace=True),
+            )
+
+        self.block1 = block(in_channels, 32)
+        self.block2 = block(32, 64, stride=2)
+        # injection point: right after block2, before parvo goes deeper
+        self.lateral_proj = nn.Conv2d(lateral_dim, 64, kernel_size=1)
+        self.block3 = block(64, 128, stride=2)
+        self.block4 = block(128, 128)
+        self.block5 = block(128, feat_dim, stride=2)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+
+    def forward_spatial(self, x, magno_spatial):
+        feat = self.block2(self.block1(x))
+        lateral = F.interpolate(
+            magno_spatial, size=feat.shape[-2:], mode="bilinear", align_corners=False
+        )
+        feat = feat + self.lateral_proj(lateral)
+        return self.block5(self.block4(self.block3(feat)))
+
+    def forward(self, x, magno_spatial):
+        return self.pool(self.forward_spatial(x, magno_spatial)).flatten(1)
+
+
+class DualPathwayLateralClassifier(nn.Module):
+    """DualPathwayClassifier variant with a magno -> parvo lateral
+    connection (see LateralParvoStream) added on top of the existing late
+    gated fusion. Same forward signature as DualPathwayClassifier, so it
+    drops into the same training/eval code as a third point of comparison
+    alongside dual_pathway/parvo_only/magno_only."""
+
+    def __init__(self, num_classes, magno_dim=128, parvo_dim=256, fused_dim=256,
+                 with_text_head=True):
+        super().__init__()
+        self.magno = MagnoStream(in_channels=1, feat_dim=magno_dim)
+        self.parvo = LateralParvoStream(in_channels=3, feat_dim=parvo_dim, lateral_dim=magno_dim)
+        self.fusion = GatedFusion(magno_dim, parvo_dim, fused_dim)
+        self.classifier = nn.Sequential(
+            nn.Linear(fused_dim, fused_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(fused_dim // 2, num_classes),
+        )
+        self.text_head = TextRegionHead(parvo_feat_dim=parvo_dim) if with_text_head else None
+
+    def forward(self, gray_lowres, color_highres, return_gate=False, return_text_mask=False):
+        magno_spatial = self.magno.forward_spatial(gray_lowres)
+        m_feat = self.magno.pool(magno_spatial).flatten(1)
+
+        spatial = self.parvo.forward_spatial(color_highres, magno_spatial)
+        p_feat = self.parvo.pool(spatial).flatten(1)
+        text_mask = None
+        if return_text_mask and self.text_head is not None:
+            text_mask = self.text_head(spatial, out_size=color_highres.shape[-2:])
 
         fused, gate_weights = self.fusion(m_feat, p_feat)
         logits = self.classifier(fused)

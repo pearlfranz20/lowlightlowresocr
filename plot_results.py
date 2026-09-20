@@ -23,6 +23,7 @@ BLUE = "#2a78d6"    # dual_pathway
 ORANGE = "#eb6834"  # parvo_only
 AQUA = "#1baf7a"    # magno_only
 YELLOW = "#eda100"  # secondary condition (not a pathway)
+PURPLE = "#8a4fd6"  # dual_pathway_lateral
 
 plt.rcParams.update({
     "font.family": "sans-serif",
