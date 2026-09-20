@@ -45,7 +45,7 @@ import torch.nn.functional as F
 from PIL import Image, ImageDraw, ImageFont
 from torch.optim import Adam
 
-from dual_pathway_classifier import DualPathwayClassifier
+from dual_pathway_classifier import DualPathwayClassifier, DualPathwayLateralClassifier
 from evaluate import (
     MagnoOnlyClassifier,
     ParvoOnlyClassifier,
@@ -391,30 +391,41 @@ def evaluate_fusion_necessary(model, dataloader, device, n_trials=5):
 
 
 def run_fusion_necessary_experiment(train_loader, test_loader, num_classes, epochs=22):
+    """Also the test bed for the lateral-connection question: does adding a
+    magno->parvo mid-trunk cross-connection (DualPathwayLateralClassifier,
+    on top of the existing late gated fusion) help on the one task
+    constructed so plain late fusion is actually required? Trained/evaluated
+    identically to dual_pathway so any gap is attributable to the
+    connection itself, not a different training regime."""
     print(f"\n{'=' * 70}\nFusion-necessary task: every sample has exactly one pathway zeroed\n{'=' * 70}")
     dual_model = DualPathwayClassifier(num_classes=num_classes, with_text_head=True).to(DEVICE)
+    lateral_model = DualPathwayLateralClassifier(num_classes=num_classes, with_text_head=True).to(DEVICE)
     parvo_model = ParvoOnlyClassifier(num_classes=num_classes).to(DEVICE)
     magno_model = MagnoOnlyClassifier(num_classes=num_classes).to(DEVICE)
 
     opt_dual = Adam(dual_model.parameters(), lr=1e-3)
+    opt_lateral = Adam(lateral_model.parameters(), lr=1e-3)
     opt_parvo = Adam(parvo_model.parameters(), lr=1e-3)
     opt_magno = Adam(magno_model.parameters(), lr=1e-3)
 
     print(f"Training for {epochs} epochs...")
     for epoch in range(epochs):
         l_dual = train_fusion_necessary_epoch(dual_model, train_loader, opt_dual, DEVICE)
+        l_lateral = train_fusion_necessary_epoch(lateral_model, train_loader, opt_lateral, DEVICE)
         l_parvo = train_baseline_clean_epoch(parvo_model, train_loader, opt_parvo, DEVICE)
         l_magno = train_baseline_clean_epoch(magno_model, train_loader, opt_magno, DEVICE)
-        print(f"  epoch {epoch + 1:2d}: dual={l_dual:.3f}  parvo_only={l_parvo:.3f}  magno_only={l_magno:.3f}")
+        print(f"  epoch {epoch + 1:2d}: dual={l_dual:.3f}  dual_lateral={l_lateral:.3f}  "
+              f"parvo_only={l_parvo:.3f}  magno_only={l_magno:.3f}")
 
     print("\nAccuracy with one pathway always missing (averaged over 5 random draws):")
     results = {
         "dual_pathway": evaluate_fusion_necessary(dual_model, test_loader, DEVICE),
+        "dual_pathway_lateral": evaluate_fusion_necessary(lateral_model, test_loader, DEVICE),
         "parvo_only": evaluate_fusion_necessary(parvo_model, test_loader, DEVICE),
         "magno_only": evaluate_fusion_necessary(magno_model, test_loader, DEVICE),
     }
     for name, acc in results.items():
-        print(f"  {name:14s}: {acc:.4f}")
+        print(f"  {name:20s}: {acc:.4f}")
 
     with open("fusion_necessary_results.json", "w") as f:
         json.dump({"num_classes": num_classes, "epochs": epochs, "accuracy": results}, f, indent=2)

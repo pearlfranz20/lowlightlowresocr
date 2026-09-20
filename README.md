@@ -36,6 +36,16 @@ color_highres ─▶ ParvoStream ─┘
   a per-sample weighting between them, rather than a fixed concat. Log these
   weights at inference time to see which pathway the model is actually relying
   on for a given input.
+- **`LateralParvoStream` / `DualPathwayLateralClassifier`** (optional) — the
+  two streams above only ever meet at `GatedFusion`, at the very end. This
+  variant additionally injects magno's spatial feature map into parvo's
+  trunk mid-forward (1x1-projected, resized, added in after parvo's first
+  downsampling block) — the same idea as SlowFast's lateral connections for
+  video (fast pathway fed into slow pathway at each stage), applied to this
+  magno/parvo split instead. The intent is a cheap global-context prior for
+  parvo's fine-detail processing, on top of the existing late fusion, not a
+  replacement for it. See [Does a lateral connection help?](#does-a-lateral-connection-help)
+  below for whether it actually does.
 - **`TextRegionHead`** — parvo-only (magno's resolution can't resolve
   characters). Predicts a per-pixel text/sign-likelihood mask, which
   `text_regions_from_mask` turns into bounding boxes.
@@ -265,8 +275,8 @@ sensor).
 ![A task neither pathway can solve alone](assets/fusion_necessary.png)
 
 This is the clean, decisive result the sections above don't produce:
-`dual_pathway` reaches 81.7%, far above both `parvo_only` (52.4%) and
-`magno_only` (50.8%), which each cap out near 50% — roughly what you'd
+`dual_pathway` reaches 79.6%, far above both `parvo_only` (52.2%) and
+`magno_only` (50.7%), which each cap out near 50% — roughly what you'd
 expect from "do well on the ~half of samples where your one pathway
 happens to survive, and have literally nothing on the other half." Only a
 model that can detect which pathway is live per sample and route to it
@@ -277,6 +287,41 @@ Reproduce with (runs automatically as part of `python benchmark.py`):
 
 ```bash
 python plot_fusion_necessary.py  # renders assets/fusion_necessary.png from fusion_necessary_results.json
+```
+
+### Does a lateral connection help?
+
+Everything above only lets magno and parvo meet once, at `GatedFusion`, at
+the very end. `DualPathwayLateralClassifier` (see [Architecture](#architecture))
+adds a second, earlier meeting point: magno's pooled spatial feature gets
+1x1-projected and broadcast into parvo's trunk partway through, the same
+idea SlowFast uses to feed its fast pathway into its slow one at each
+stage. This task — the one built specifically so plain late fusion is
+*required* — is the right place to ask whether an earlier connection buys
+anything on top of that: `dual_pathway_lateral` reaches **80.0%** against
+`dual_pathway`'s **79.6%**, trained and evaluated identically.
+
+That's a wash, not a win — 0.4 points on a 5-draw average is well inside
+this benchmark's run-to-run noise (see the GTSRB section below for a
+documented same-repo case of a ~1-point ordering flip between reruns).
+The honest reading: on this task, a per-sample gate that can already tell
+"which pathway is alive" from the *pooled* feature vectors alone has
+nothing structurally missing that an earlier, coarser broadcast of magno's
+context would fix — the bottleneck here was never *when* the pathways
+meet, it was routing correctly once they do, which late fusion already
+handles. A lateral connection would be expected to earn more on a task
+where the deficiency is spatial (parvo needing pixel-level *location* cues
+from magno mid-processing, not just a global "which sensor is alive" bit)
+— `CURE-TSR`'s real optical/sensor degradations below are a better test of
+that than this pathway-zeroing construction, since blur/noise/darkening
+distort content within a still-present pathway rather than removing one
+outright.
+
+Reproduce with (runs automatically as part of the fusion-necessary
+experiment in `python benchmark.py`):
+
+```bash
+python plot_fusion_necessary.py  # now also plots dual_pathway_lateral, if present in the results json
 ```
 
 ## Results (real data: GTSRB subset)
@@ -409,6 +454,42 @@ numbers into `gtsrb_full_results.json`):
 python plot_gtsrb_groups.py  # renders assets/gtsrb_task_groups.png
 ```
 
+## Results (real varied-quality data: CURE-TSR)
+
+GTSRB has *some* natural lighting/blur variation, but no controlled
+severity axis — the corruption sweeps above are this repo's own synthetic
+approximation of "bad conditions" (blur + noise) layered on top of it.
+[CURE-TSR](https://github.com/olivesgatech/CURE-TSR) (Temel et al.,
+"Challenging Unreal and Real Environments for Traffic Sign Recognition")
+is the real-data version of that sweep: the *same* real sign photos,
+re-rendered under 12 challenge types (decolorization, blur, noise, rain,
+snow, haze, exposure, darkening, ...) at 5 labeled severity levels each,
+plus a challenge-free baseline. `benchmark_cure_tsr.py` trains on the
+challenge-free real images and evaluates a severity curve (levels 0-5) on
+six of those challenges chosen for this repo's low-light/low-res theme:
+decolorization, darkening, exposure, Gaussian blur, noise, and haze.
+
+This is also a better test bed for the lateral-connection question than
+the pathway-zeroing task above: CURE-TSR's degradations *distort content
+within* a still-present pathway (parvo goes dark/blurry/noisy, it doesn't
+disappear), rather than removing a whole pathway outright — exactly the
+condition where a mid-trunk broadcast from magno was predicted to matter
+more than it did above. `dual_pathway`, `dual_pathway_lateral`,
+`parvo_only`, and `magno_only` are trained identically and evaluated
+across all six challenge curves for a direct comparison.
+
+CURE-TSR is gated behind a download-request form (~2.2M images total), not
+shipped with this repo — same caveat as GTSRB above, see
+`benchmark_cure_tsr.py`'s docstring for exactly what to request and how to
+lay it out locally.
+
+Reproduce with (after requesting/downloading CURE-TSR):
+
+```bash
+python benchmark_cure_tsr.py  # trains all four models, writes cure_tsr_results.json
+python plot_cure_tsr.py       # renders assets/cure_tsr_*.png from that json
+```
+
 ## Decision layer (optional): Jev
 
 The model's raw outputs aren't decisions: logits aren't calibrated
@@ -452,3 +533,5 @@ act on directly instead of hand-rolling threshold logic on logits.
 | `benchmark_gtsrb_full.py` | Full 43-class GTSRB, official test set, clean accuracy vs. published results |
 | `plot_gtsrb_full.py` | Renders `assets/gtsrb_full_comparison.png` from `benchmark_gtsrb_full.py`'s output |
 | `plot_gtsrb_groups.py` | Renders `assets/gtsrb_task_groups.png` (digit-only vs. shape-distinct accuracy) |
+| `benchmark_cure_tsr.py` | Real varied-quality benchmark on CURE-TSR (real photos x 12 challenge types x 5 severity levels); needs a separate, gated download |
+| `plot_cure_tsr.py` | Renders `assets/cure_tsr_*.png` from `benchmark_cure_tsr.py`'s output |
