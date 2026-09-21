@@ -161,7 +161,17 @@ def _batch_real_inputs(color_imgs, magno_size=MAGNO_SIZE):
     return torch.stack(gray_batch), color_imgs
 
 
-def train_epoch(model, dataloader, optimizer, device, pathway_dropout_p=0.0):
+def train_epoch(model, dataloader, optimizer, device, pathway_dropout_p=0.0, dropout_rng=None):
+    """dropout_rng: a random.Random instance to draw the pathway-dropout coin
+    flip from, instead of the shared global `random` module. Without this,
+    every model's dropout draws come from the same process-wide generator,
+    so changing one model's training (e.g. a lateral-dropout flag on a
+    sibling model trained earlier in the same epoch loop) shifts everyone
+    else's coin flips too -- fine for a quick benchmark run, not fine for an
+    isolated A/B on one model's own setting. Defaults to the global module
+    to keep existing call sites' behavior unchanged."""
+    if dropout_rng is None:
+        dropout_rng = random
     model.train()
     criterion = nn.CrossEntropyLoss()
     total_loss = 0.0
@@ -170,7 +180,7 @@ def train_epoch(model, dataloader, optimizer, device, pathway_dropout_p=0.0):
         gray_batch, color_batch = _batch_real_inputs(color_imgs)
         gray_batch, color_batch = gray_batch.to(device), color_batch.to(device)
 
-        r = random.random()
+        r = dropout_rng.random()
         if r < pathway_dropout_p / 2:
             color_batch = torch.zeros_like(color_batch)
         elif r < pathway_dropout_p:
@@ -231,20 +241,37 @@ def main():
     train_loader = make_batches(train_imgs, train_labs)
     print(f"Train: {len(train_labs)} challenge-free real images")
 
+    # Each model gets its own torch init seed and its own private dropout RNG
+    # (see train_epoch's/LateralParvoStream's docstrings) so that re-running
+    # this script, or changing one model's hyperparameters, doesn't silently
+    # perturb every other model's weight init or per-batch coin flips through
+    # a shared global random state.
+    torch.manual_seed(1000)
+    dual_pathway = DualPathwayClassifier(num_classes=num_classes, with_text_head=False).to(DEVICE)
+    torch.manual_seed(1001)
+    dual_pathway_lateral = DualPathwayLateralClassifier(
+        num_classes=num_classes, with_text_head=False, lateral_dropout_p=0.3,
+        lateral_rng_seed=2001).to(DEVICE)
+    torch.manual_seed(1002)
+    parvo_only = ParvoOnlyClassifier(num_classes=num_classes).to(DEVICE)
+    torch.manual_seed(1003)
+    magno_only = MagnoOnlyClassifier(num_classes=num_classes).to(DEVICE)
+
     models = {
-        "dual_pathway": DualPathwayClassifier(num_classes=num_classes, with_text_head=False).to(DEVICE),
-        "dual_pathway_lateral": DualPathwayLateralClassifier(
-            num_classes=num_classes, with_text_head=False, lateral_dropout_p=0.3).to(DEVICE),
-        "parvo_only": ParvoOnlyClassifier(num_classes=num_classes).to(DEVICE),
-        "magno_only": MagnoOnlyClassifier(num_classes=num_classes).to(DEVICE),
+        "dual_pathway": dual_pathway,
+        "dual_pathway_lateral": dual_pathway_lateral,
+        "parvo_only": parvo_only,
+        "magno_only": magno_only,
     }
     optimizers = {name: Adam(m.parameters(), lr=1e-3) for name, m in models.items()}
     dropout_p = {"dual_pathway": 0.15, "dual_pathway_lateral": 0.15, "parvo_only": 0.0, "magno_only": 0.0}
+    dropout_rngs = {name: random.Random(3000 + i) for i, name in enumerate(models)}
 
     epochs = 20
     print(f"Training for {epochs} epochs...")
     for epoch in range(epochs):
-        losses = {name: train_epoch(m, train_loader, optimizers[name], DEVICE, dropout_p[name])
+        losses = {name: train_epoch(m, train_loader, optimizers[name], DEVICE, dropout_p[name],
+                                     dropout_rng=dropout_rngs[name])
                   for name, m in models.items()}
         print(f"  epoch {epoch + 1:2d}: " + "  ".join(f"{n}={l:.3f}" for n, l in losses.items()))
 

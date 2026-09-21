@@ -497,8 +497,10 @@ challenge types.
 every challenge type — the pattern from the synthetic and GTSRB sweeps
 holds on real degraded photos too. `dual_pathway` and `dual_pathway_lateral`
 come out roughly tied overall (67.4% and 67.1% respectively, averaged
-across all six curves and all severity levels — see the gate-collapse fix
-below), both ahead of `magno_only` (66.8%) and well ahead of `parvo_only`
+across all six curves and all severity levels — this single run's numbers;
+see the controlled multi-seed gate-weighting discussion below for why
+these exact figures shouldn't be read too precisely), both ahead of
+`magno_only` (66.8%) and well ahead of `parvo_only`
 (58.2%). `dual_pathway_lateral` is specifically ahead on `gaussian_blur` —
 42.7% vs. `dual_pathway`'s 27.7% and `magno_only`'s 26.1% at level 5 — real
 optical blur being exactly the kind of in-pathway, spatially-structured
@@ -522,56 +524,73 @@ than showing a curve that implies fusion should have saved it.
 
 ![Learned gate weighting, CURE-TSR](assets/cure_tsr_gate_weights.png)
 
-The first run of this benchmark surfaced a real problem: `dual_pathway`'s
-gate landed at a stable 80/20 magno/parvo split, clean or degraded, but
-`dual_pathway_lateral`'s gate collapsed to **100% parvo, 0% magno** in
-both conditions — the late-fusion gate stopped using magno's feature
-vector entirely. The mechanism, once you look for it: `LateralParvoStream`
+The first run of this benchmark surfaced what looked like a real problem:
+`dual_pathway`'s gate landed at a stable 80/20 magno/parvo split, clean or
+degraded, but `dual_pathway_lateral`'s gate collapsed to **100% parvo, 0%
+magno** in both conditions — the late-fusion gate stopped using magno's
+feature vector entirely. The suspected mechanism: `LateralParvoStream`
 broadcasts magno's spatial feature into parvo's trunk on *every* forward
-pass during training, with no exceptions, so gradient descent finds the
-cheapest fix available — stop training the gate to use magno's vote at
-all, since parvo's own trunk already has magno's context baked in by the
-time it reaches `GatedFusion`. That's a locally-consistent shortcut during
-training, but it also means the gate never learns *when* to lean on magno
-independently, which is exactly the routing skill this architecture is
-supposed to have — and matched the accuracy picture: `dual_pathway_lateral`
-came in behind plain late fusion overall (65.1% vs. 68.1% in that run).
+pass during training, so gradient descent could find it cheapest to stop
+training the gate to use magno's vote at all, since parvo's own trunk
+already has magno's context baked in by the time it reaches `GatedFusion`.
+The proposed fix, `lateral_dropout_p` (`dual_pathway_classifier.py`,
+`LateralParvoStream`): randomly skip the lateral broadcast for a fraction
+of training batches, so parvo can't assume the broadcast will always be
+there and the gate has to keep a genuine, independently useful magno vote
+as a fallback. Re-running with it looked like a clean fix at first — gate
+no longer collapsed, accuracy gap closed.
 
-The fix (now in `dual_pathway_classifier.py`, `LateralParvoStream`'s
-`lateral_dropout_p`): randomly skip the lateral broadcast for a fraction of
-training batches (0.3 here, via `benchmark_cure_tsr.py`'s
-`lateral_dropout_p=0.3`), same idea as the existing pathway-dropout
-mechanism but targeted at the *connection* instead of a whole pathway's
-input. Parvo can no longer assume magno's context will always arrive
-through the lateral path, so the gate has to keep a genuine, independently
-useful magno vote as a fallback rather than fully offloading onto parvo.
-Eval always uses the full, undropped lateral connection (the flag checks
-`self.training`) — only the training dynamics change.
+That first before/after wasn't a controlled comparison, though (pathway-
+dropout and lateral-dropout coin flips shared Python's global `random`
+module across all four models, so changing one model's training shifted
+the others' draws too), so `benchmark_cure_tsr_ablation.py` was built to
+isolate it properly: `DualPathwayLateralClassifier` trained twice per
+seed, back to back, with identical torch weight-init and identical private
+pathway-dropout draws for both arms — the *only* thing that can differ is
+whether `lateral_dropout_p` is 0.0 or 0.3. Testing across three independent
+seed pairs (six trainings total):
 
-Re-running with the fix: `dual_pathway_lateral`'s gate now sits at 86%
-magno / 14% parvo clean, shifting to 77% / 23% degraded — a genuine,
-non-collapsed split that actually moves with severity, and moves *more*
-than `dual_pathway`'s own gate did in this run (90%→85%, a 5-point shift,
-vs. `dual_pathway_lateral`'s 86%→77%, a 9-point shift). Overall accuracy
-also closed the gap (67.1% vs. 67.4%, from 65.1% vs. 68.1% before), and
-`dual_pathway_lateral` is now the clear winner on `gaussian_blur`
-specifically, the challenge type most aligned with what a spatial lateral
-broadcast should help with in the first place.
+| Seed pair | no dropout (acc) | with dropout 0.3 (acc) | no-dropout gate collapsed? |
+|---|---|---|---|
+| 0 | 66.1% | 68.1% | No — 92%/8% clean, healthy |
+| 1 | 62.8% | 66.5% | No — 82%/18% clean, healthy |
+| 2 | 66.4% | 64.7% | No — 91%/9% clean, healthy |
+| **mean** | **65.1% (±1.6)** | **66.4% (±1.4)** | **0/3 collapsed** |
 
-One honest caveat: this wasn't a clean isolated A/B. `lateral_dropout_p`
-draws from Python's shared global `random` module, and since
-`dual_pathway_lateral` trains before `parvo_only`/`magno_only` each epoch
-(dict insertion order), adding those draws shifted the pathway-dropout
-coin-flips for *all four* models between the two runs, not just the
-lateral one — visible in `parvo_only`'s overall average also moving (46.7%
-→ 58.2%) despite its code being untouched. The gate-collapse fix itself
-isn't in question — it's a direct, mechanistic before/after on
-`dual_pathway_lateral`'s own gate, unaffected by what number a sibling
-model happened to land on — but treat the exact overall-accuracy deltas as
-noisy rather than a controlled comparison. A real controlled test would
-seed each model's dropout draws independently; worth doing before trusting
-the accuracy numbers precisely, even though the gate-behavior story is
-solid as reported.
+The real finding here isn't about `lateral_dropout_p` — it's that the
+**original 100%/0% collapse doesn't reproduce.** Across all six controlled
+trainings (three seeds × both settings), not one gate came anywhere close
+to a full collapse; every one landed on a strongly magno-leaning but
+genuinely mixed split (roughly 80-92% magno clean), and every one shifted
+further toward magno under degradation. The dramatic collapse in the very
+first run looks like a fluke of that specific (as it turned out,
+confounded) training trajectory, not a robust property of the lateral
+architecture — a useful correction to the earlier writeup, and a reminder
+that a single before/after on a stochastic training process isn't enough
+to trust, even when the story it tells is mechanistically plausible.
+
+`lateral_dropout_p=0.3` itself comes out with a small, mostly-positive but
+noisy effect: +1.3 points on average, winning 2 of 3 seed pairs, well
+within the ~1.5-point seed-to-seed spread either arm shows on its own.
+That's weak evidence for "keep it as a cheap, low-downside regularizer,"
+not the decisive fix the first writeup claimed — it's left on
+(`lateral_dropout_p=0.3` in `benchmark_cure_tsr.py`) on that weaker
+justification, not because it's been shown to reliably prevent a collapse
+that, on this evidence, is rare to begin with.
+
+Two caveats worth stating plainly: PyTorch's CPU backend isn't
+bit-reproducible across separate process launches even with matching
+seeds (multi-threaded float summation order varies with thread
+scheduling), so "same seed" guarantees a controlled comparison *within one
+script run*, not an exact repeat across runs — the three seed pairs above
+are best read as three independent draws, not three exact reruns of a
+fixed condition. And three seeds is enough to overturn "always collapses"
+but not enough to precisely pin down `lateral_dropout_p`'s true effect
+size — treat 66.4% vs. 65.1% as "probably slightly positive," not as a
+settled number.
+
+Reproduce with: `python benchmark_cure_tsr_ablation.py` (after the same
+CURE-TSR download/extraction `benchmark_cure_tsr.py` needs).
 
 Reproduce with (after requesting/downloading CURE-TSR):
 
