@@ -592,6 +592,41 @@ settled number.
 Reproduce with: `python benchmark_cure_tsr_ablation.py` (after the same
 CURE-TSR download/extraction `benchmark_cure_tsr.py` needs).
 
+### Trying to improve on these numbers
+
+The GTSRB full-run playbook (more training data, weight_decay + LR
+schedule, class weighting, spatial augmentation — see
+`benchmark_gtsrb_full.py`) doesn't transfer to CURE-TSR cleanly. Bundling
+all four into one run made every one of the four models *worse* by 4-5
+points, including `parvo_only` and `magno_only`, which have nothing to do
+with gating — so `benchmark_cure_tsr_recipe_ablation.py` isolated each
+ingredient against those two single-pathway models alone (no gating
+confound). In isolation: more training data and weight_decay+schedule each
+genuinely help (+2 to +3 points, and they still compose when combined);
+class weighting helps `magno_only` but costs `parvo_only` 5 points (net
+negative); spatial augmentation costs both models 3.5-5 points on its own
+— these crops are native ~17-20px, much smaller than GTSRB's, and don't
+survive rotation/scale resampling the way GTSRB's larger crops do.
+
+Applying just the two validated ingredients (more data + weight_decay/
+schedule, dropping augmentation and class-weighting) back onto the full
+four-model benchmark didn't reproduce the isolated gain, though: 2 of 4
+models improved (`dual_pathway_lateral` +0.4, `parvo_only` +3.6) and 2 got
+worse (`dual_pathway` -3.1, `magno_only` -3.1) relative to the numbers
+reported above. The likely reason is the same CPU floating-point
+non-determinism noted earlier, compounded by the diagnostic script using
+different model-init seeds than `benchmark_cure_tsr.py`'s main run — so
+this isn't a real regression, but it isn't a validated improvement either,
+just an inconclusive result once seed noise is in the picture. Given that,
+the recipe in `benchmark_cure_tsr.py` was left as originally committed
+(150/class, 20 epochs) rather than ship a change that isolated testing
+couldn't actually confirm helps end to end — the honest takeaway is that
+two ingredients that clearly help a single pathway in isolation aren't
+guaranteed to move the full gated system by a matching amount, and proving
+that they do would need a properly seed-matched controlled test (same
+approach as the lateral-dropout A/B above), not just "run it once and
+compare."
+
 Reproduce with (after requesting/downloading CURE-TSR):
 
 ```bash
