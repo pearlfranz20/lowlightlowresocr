@@ -495,13 +495,14 @@ challenge types.
 
 `parvo_only` is consistently the worst performer as severity rises across
 every challenge type — the pattern from the synthetic and GTSRB sweeps
-holds on real degraded photos too. `dual_pathway` comes out on top overall
-(68.1% averaged across all six curves and all severity levels, vs. 65.1%
-for `dual_pathway_lateral`, 63.6% for `magno_only`, 46.7% for `parvo_only`),
-and is visibly ahead of `magno_only` specifically on `gaussian_blur` and
-`haze` — real optical blur and atmospheric scattering, exactly the kind of
-in-pathway (not pathway-missing) degradation this test bed was built to
-probe.
+holds on real degraded photos too. `dual_pathway` and `dual_pathway_lateral`
+come out roughly tied overall (67.4% and 67.1% respectively, averaged
+across all six curves and all severity levels — see the gate-collapse fix
+below), both ahead of `magno_only` (66.8%) and well ahead of `parvo_only`
+(58.2%). `dual_pathway_lateral` is specifically ahead on `gaussian_blur` —
+42.7% vs. `dual_pathway`'s 27.7% and `magno_only`'s 26.1% at level 5 — real
+optical blur being exactly the kind of in-pathway, spatially-structured
+degradation `LateralParvoStream`'s mid-trunk broadcast was designed for.
 
 `darkening` and `exposure` are the outlier curves: every model, including
 `magno_only`, collapses to chance (~7-11%, vs. 7.1% for 14 classes) by
@@ -521,36 +522,56 @@ than showing a curve that implies fusion should have saved it.
 
 ![Learned gate weighting, CURE-TSR](assets/cure_tsr_gate_weights.png)
 
-This is the most interesting result in this section, and it complicates
-the [lateral-connection](#does-a-lateral-connection-help) writeup above
-rather than resolving it cleanly. `dual_pathway`'s gate lands at a static
-80/20 magno/parvo split, clean or degraded — a strong, stable preference
-for magno that barely moves with severity, similar in spirit to the GTSRB
-gate above. `dual_pathway_lateral`'s gate, by contrast, collapsed to
-**100% parvo, 0% magno**, in both conditions — the late-fusion gate
-stopped using magno's feature vector at all. That's not the same as
-ignoring magno: `LateralParvoStream` already broadcasts magno's pooled
-spatial feature into parvo's trunk mid-forward, so the gate learned that
-whatever magno contributes is already baked into parvo's features by the
-time they reach `GatedFusion`, making a second, separate magno vote
-redundant. That's a coherent mechanism, and it explains why
-`dual_pathway_lateral` isn't *broken* (73.2% vs. `dual_pathway`'s 70.0% on
-`noise` at level 5, for instance) — but on the overall average it's
-slightly behind plain late fusion (65.1% vs. 68.1%), and clearly behind on
-`decolorization` (82.9% vs. 92.1% at level 5) and `haze` (15.2% vs. 14.5%,
-roughly tied, but `dual_pathway` held on longer through levels 2-3: 86.8%
-vs. 66.1% at level 2). The [earlier section](#does-a-lateral-connection-help)
-predicted CURE-TSR's real in-pathway degradation would be a better test of
-whether an early lateral connection helps than the synthetic
-pathway-zeroing task, since here content gets distorted rather than a
-whole pathway disappearing. It was — just not in the direction hoped for:
-routing magno's context through the lateral path *and* then still trying
-to blend it again at the gate turned out to be worse than letting the gate
-fully own the mixing decision, at least at this model scale and training
-budget. `LateralParvoStream` gives parvo a way to use magno's context, but
-here the network prefers to spend it by trusting parvo's own (informed)
-features rather than by treating magno as a second, separately-weighted
-vote at fusion time.
+The first run of this benchmark surfaced a real problem: `dual_pathway`'s
+gate landed at a stable 80/20 magno/parvo split, clean or degraded, but
+`dual_pathway_lateral`'s gate collapsed to **100% parvo, 0% magno** in
+both conditions — the late-fusion gate stopped using magno's feature
+vector entirely. The mechanism, once you look for it: `LateralParvoStream`
+broadcasts magno's spatial feature into parvo's trunk on *every* forward
+pass during training, with no exceptions, so gradient descent finds the
+cheapest fix available — stop training the gate to use magno's vote at
+all, since parvo's own trunk already has magno's context baked in by the
+time it reaches `GatedFusion`. That's a locally-consistent shortcut during
+training, but it also means the gate never learns *when* to lean on magno
+independently, which is exactly the routing skill this architecture is
+supposed to have — and matched the accuracy picture: `dual_pathway_lateral`
+came in behind plain late fusion overall (65.1% vs. 68.1% in that run).
+
+The fix (now in `dual_pathway_classifier.py`, `LateralParvoStream`'s
+`lateral_dropout_p`): randomly skip the lateral broadcast for a fraction of
+training batches (0.3 here, via `benchmark_cure_tsr.py`'s
+`lateral_dropout_p=0.3`), same idea as the existing pathway-dropout
+mechanism but targeted at the *connection* instead of a whole pathway's
+input. Parvo can no longer assume magno's context will always arrive
+through the lateral path, so the gate has to keep a genuine, independently
+useful magno vote as a fallback rather than fully offloading onto parvo.
+Eval always uses the full, undropped lateral connection (the flag checks
+`self.training`) — only the training dynamics change.
+
+Re-running with the fix: `dual_pathway_lateral`'s gate now sits at 86%
+magno / 14% parvo clean, shifting to 77% / 23% degraded — a genuine,
+non-collapsed split that actually moves with severity, and moves *more*
+than `dual_pathway`'s own gate did in this run (90%→85%, a 5-point shift,
+vs. `dual_pathway_lateral`'s 86%→77%, a 9-point shift). Overall accuracy
+also closed the gap (67.1% vs. 67.4%, from 65.1% vs. 68.1% before), and
+`dual_pathway_lateral` is now the clear winner on `gaussian_blur`
+specifically, the challenge type most aligned with what a spatial lateral
+broadcast should help with in the first place.
+
+One honest caveat: this wasn't a clean isolated A/B. `lateral_dropout_p`
+draws from Python's shared global `random` module, and since
+`dual_pathway_lateral` trains before `parvo_only`/`magno_only` each epoch
+(dict insertion order), adding those draws shifted the pathway-dropout
+coin-flips for *all four* models between the two runs, not just the
+lateral one — visible in `parvo_only`'s overall average also moving (46.7%
+→ 58.2%) despite its code being untouched. The gate-collapse fix itself
+isn't in question — it's a direct, mechanistic before/after on
+`dual_pathway_lateral`'s own gate, unaffected by what number a sibling
+model happened to land on — but treat the exact overall-accuracy deltas as
+noisy rather than a controlled comparison. A real controlled test would
+seed each model's dropout draws independently; worth doing before trusting
+the accuracy numbers precisely, even though the gate-behavior story is
+solid as reported.
 
 Reproduce with (after requesting/downloading CURE-TSR):
 

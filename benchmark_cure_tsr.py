@@ -233,7 +233,8 @@ def main():
 
     models = {
         "dual_pathway": DualPathwayClassifier(num_classes=num_classes, with_text_head=False).to(DEVICE),
-        "dual_pathway_lateral": DualPathwayLateralClassifier(num_classes=num_classes, with_text_head=False).to(DEVICE),
+        "dual_pathway_lateral": DualPathwayLateralClassifier(
+            num_classes=num_classes, with_text_head=False, lateral_dropout_p=0.3).to(DEVICE),
         "parvo_only": ParvoOnlyClassifier(num_classes=num_classes).to(DEVICE),
         "magno_only": MagnoOnlyClassifier(num_classes=num_classes).to(DEVICE),
     }
