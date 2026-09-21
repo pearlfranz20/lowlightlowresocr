@@ -5,3 +5,4 @@ gtsrb_data/
 gtsrb_checkpoints/
 cure_tsr_data/
 cure_tsr_run*.log
+cure_tsr_ablation*.log
