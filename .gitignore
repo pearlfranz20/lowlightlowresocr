@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 gtsrb_data/
 gtsrb_checkpoints/
+cure_tsr_data/
+cure_tsr_run.log
