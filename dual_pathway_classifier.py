@@ -339,9 +339,21 @@ class DualPathwayClassifier(nn.Module):
 class LateralParvoStream(nn.Module):
     """Same conv trunk as ParvoStream, but forward_spatial takes magno's
     spatial feature map and injects it (1x1-projected, resized to match)
-    right after the first downsampling block."""
+    right after the first downsampling block.
 
-    def __init__(self, in_channels=3, feat_dim=256, lateral_dim=128):
+    lateral_dropout_p: probability of skipping the lateral injection for a
+    given batch during training (the broadcast is just omitted, not
+    zeroed-then-projected, so no bias-only signal leaks through). Without
+    this, parvo's trunk can always assume magno's context will be there and
+    routes all of it into itself, which lets GatedFusion's separate magno
+    vote go fully unused (see the CURE-TSR gate-collapse writeup in
+    README.md) -- the late-fusion gate never has to learn to use magno's
+    own vector because parvo alone is always sufficient. Randomly pulling
+    the lateral connection away forces parvo to sometimes stand on its own
+    trunk's features, which keeps a real, non-redundant magno vote worth
+    having at the gate."""
+
+    def __init__(self, in_channels=3, feat_dim=256, lateral_dim=128, lateral_dropout_p=0.0):
         super().__init__()
 
         def block(c_in, c_out, stride=1):
@@ -359,13 +371,15 @@ class LateralParvoStream(nn.Module):
         self.block4 = block(128, 128)
         self.block5 = block(128, feat_dim, stride=2)
         self.pool = nn.AdaptiveAvgPool2d(1)
+        self.lateral_dropout_p = lateral_dropout_p
 
     def forward_spatial(self, x, magno_spatial):
         feat = self.block2(self.block1(x))
-        lateral = F.interpolate(
-            magno_spatial, size=feat.shape[-2:], mode="bilinear", align_corners=False
-        )
-        feat = feat + self.lateral_proj(lateral)
+        if not (self.training and random.random() < self.lateral_dropout_p):
+            lateral = F.interpolate(
+                magno_spatial, size=feat.shape[-2:], mode="bilinear", align_corners=False
+            )
+            feat = feat + self.lateral_proj(lateral)
         return self.block5(self.block4(self.block3(feat)))
 
     def forward(self, x, magno_spatial):
@@ -380,10 +394,11 @@ class DualPathwayLateralClassifier(nn.Module):
     alongside dual_pathway/parvo_only/magno_only."""
 
     def __init__(self, num_classes, magno_dim=128, parvo_dim=256, fused_dim=256,
-                 with_text_head=True):
+                 with_text_head=True, lateral_dropout_p=0.0):
         super().__init__()
         self.magno = MagnoStream(in_channels=1, feat_dim=magno_dim)
-        self.parvo = LateralParvoStream(in_channels=3, feat_dim=parvo_dim, lateral_dim=magno_dim)
+        self.parvo = LateralParvoStream(in_channels=3, feat_dim=parvo_dim, lateral_dim=magno_dim,
+                                         lateral_dropout_p=lateral_dropout_p)
         self.fusion = GatedFusion(magno_dim, parvo_dim, fused_dim)
         self.classifier = nn.Sequential(
             nn.Linear(fused_dim, fused_dim // 2),
