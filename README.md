@@ -483,6 +483,75 @@ shipped with this repo — same caveat as GTSRB above, see
 `benchmark_cure_tsr.py`'s docstring for exactly what to request and how to
 lay it out locally.
 
+Trained on 1,806 challenge-free real images (14 sign classes, capped at 150/
+class — some classes have fewer real instances than that), 20 epochs, Adam,
+pathway-dropout 0.15 for both dual models. Evaluated on held-out real images
+(40/class) across all 6 challenge levels for each of the six tested
+challenge types.
+
+**Accuracy vs. challenge level, per challenge type:**
+
+![Accuracy vs. CURE-TSR challenge level](assets/cure_tsr_severity_grid.png)
+
+`parvo_only` is consistently the worst performer as severity rises across
+every challenge type — the pattern from the synthetic and GTSRB sweeps
+holds on real degraded photos too. `dual_pathway` comes out on top overall
+(68.1% averaged across all six curves and all severity levels, vs. 65.1%
+for `dual_pathway_lateral`, 63.6% for `magno_only`, 46.7% for `parvo_only`),
+and is visibly ahead of `magno_only` specifically on `gaussian_blur` and
+`haze` — real optical blur and atmospheric scattering, exactly the kind of
+in-pathway (not pathway-missing) degradation this test bed was built to
+probe.
+
+`darkening` and `exposure` are the outlier curves: every model, including
+`magno_only`, collapses to chance (~7-11%, vs. 7.1% for 14 classes) by
+level 4-5. Checking the actual images explains why — this isn't a modeling
+failure, it's the input carrying no signal at all: a level-5 `darkening`
+crop averages pixel value 11/255 (std 3), a level-5 `exposure` crop
+averages 254/255 (std 1.9), against ~190/255 (std 50) for the same sign
+challenge-free. At that severity CURE-TSR's darkening/exposure renders are
+functionally solid black or solid white rectangles — no pathway, no matter
+how it's fused, can classify a blank image. Every other tested challenge
+(decolorization, blur, noise, haze) degrades the *content* while leaving
+some signal in the frame; these two are the only ones that erase it
+entirely at max severity, and the results reflect that honestly rather
+than showing a curve that implies fusion should have saved it.
+
+**Learned gate weighting, clean vs. heavily degraded:**
+
+![Learned gate weighting, CURE-TSR](assets/cure_tsr_gate_weights.png)
+
+This is the most interesting result in this section, and it complicates
+the [lateral-connection](#does-a-lateral-connection-help) writeup above
+rather than resolving it cleanly. `dual_pathway`'s gate lands at a static
+80/20 magno/parvo split, clean or degraded — a strong, stable preference
+for magno that barely moves with severity, similar in spirit to the GTSRB
+gate above. `dual_pathway_lateral`'s gate, by contrast, collapsed to
+**100% parvo, 0% magno**, in both conditions — the late-fusion gate
+stopped using magno's feature vector at all. That's not the same as
+ignoring magno: `LateralParvoStream` already broadcasts magno's pooled
+spatial feature into parvo's trunk mid-forward, so the gate learned that
+whatever magno contributes is already baked into parvo's features by the
+time they reach `GatedFusion`, making a second, separate magno vote
+redundant. That's a coherent mechanism, and it explains why
+`dual_pathway_lateral` isn't *broken* (73.2% vs. `dual_pathway`'s 70.0% on
+`noise` at level 5, for instance) — but on the overall average it's
+slightly behind plain late fusion (65.1% vs. 68.1%), and clearly behind on
+`decolorization` (82.9% vs. 92.1% at level 5) and `haze` (15.2% vs. 14.5%,
+roughly tied, but `dual_pathway` held on longer through levels 2-3: 86.8%
+vs. 66.1% at level 2). The [earlier section](#does-a-lateral-connection-help)
+predicted CURE-TSR's real in-pathway degradation would be a better test of
+whether an early lateral connection helps than the synthetic
+pathway-zeroing task, since here content gets distorted rather than a
+whole pathway disappearing. It was — just not in the direction hoped for:
+routing magno's context through the lateral path *and* then still trying
+to blend it again at the gate turned out to be worse than letting the gate
+fully own the mixing decision, at least at this model scale and training
+budget. `LateralParvoStream` gives parvo a way to use magno's context, but
+here the network prefers to spend it by trusting parvo's own (informed)
+features rather than by treating magno as a second, separately-weighted
+vote at fusion time.
+
 Reproduce with (after requesting/downloading CURE-TSR):
 
 ```bash
