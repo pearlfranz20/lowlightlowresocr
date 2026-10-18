@@ -73,13 +73,19 @@ def main():
                             color=c, alpha=0.15, linewidth=0)
             ax.plot(xs, mu, color=c, linewidth=2, marker=MARKERS.get(name, "o"), markersize=6,
                     markeredgecolor="white", markeredgewidth=1, label=LABELS.get(name, name))
-        ax.axhline(chance, color=MUTED, linewidth=1, linestyle=":")
+        lo = min(0.7, chance) if any(
+            lv and lv["mean"] < 0.72 for m in models.values() for lv in m["accuracy"][sweep]) else 0.7
+        if lo <= chance:
+            ax.axhline(chance, color=MUTED, linewidth=1, linestyle=":")
         ax.set_title(sweep.replace("_", " "), color=INK, fontsize=11, loc="left")
         ax.set_xlabel("severity level (0 = clean)", color=MUTED, fontsize=9)
-        ax.set_ylim(0, 1.02)
+        ax.set_ylim(lo, 1.01)
         ax.set_xticks(range(len(next(iter(models.values()))["accuracy"][sweep])))
     axes[0].set_ylabel("test accuracy", color=MUTED, fontsize=9)
-    axes[0].text(0, chance - 0.05, "chance", color=MUTED, fontsize=8, ha="left")
+    if axes[0].get_ylim()[0] <= chance:
+        axes[0].text(0, chance - 0.05, "chance", color=MUTED, fontsize=8, ha="left")
+    else:
+        axes[0].set_ylabel(f"test accuracy (axis starts at {axes[0].get_ylim()[0]:.0%})", color=MUTED, fontsize=9)
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=len(labels), frameon=False, fontsize=9,
                bbox_to_anchor=(0.5, -0.02))

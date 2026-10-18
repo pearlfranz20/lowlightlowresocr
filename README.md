@@ -10,7 +10,7 @@ or distance destroy fine detail but coarse shape often survives.
 
 | Question | Answer | Evidence |
 |---|---|---|
-| Does it match modern backbones under low light / low resolution? | <!-- VS_SOTA_SUMMARY --> | [Head-to-head](#head-to-head-vs-resnet-18-and-mobilenetv3) |
+| Does it match modern backbones under low light / low resolution? | Partly, on synthetic data only. In extreme low light both `dual_pathway` and `magno_only` beat MobileNetV3-Small by about 7 points on every seed, and `magno_only` does it at 1/37 of the compute. ResNet-18 still wins every condition, by 3 to 7 points at the hardest levels. | [Head-to-head](#head-to-head-vs-resnet-18-and-mobilenetv3) |
 | Clean accuracy on GTSRB (43 classes, official test set) | 93.4%, vs. 99.85% published SOTA. Not competitive on clean data, and not designed to be. | [GTSRB](#gtsrb-clean-accuracy-vs-published-results) |
 | Does the gate shift toward magno as input degrades? | Slightly, and inconsistently. It mostly locks onto whichever pathway is stronger on average. | [Gate behavior](#gate-behavior) |
 | Is fusion ever strictly required? | Only on a constructed task where one pathway is zeroed per sample. | [Constructed task](#a-task-built-to-require-fusion) |
@@ -57,7 +57,75 @@ new head-to-head section.
 
 ## Head-to-head vs. ResNet-18 and MobileNetV3
 
-<!-- VS_SOTA_SECTION -->
+`benchmark_vs_sota.py` puts this repo's models against two standard modern
+backbones, ResNet-18 (11.2M params) and MobileNetV3-Small (1.5M params, an
+architecture built for efficient on-device inference), under one protocol:
+
+- **One degraded frame per sample, then both pathways derived from it.** A
+  capture simulator models a camera in the dark and at a distance: photon
+  shot noise, read noise, 8-bit quantization at the sensor's exposure, then
+  digital gain (auto-exposure), plus area downsampling for distance. Three
+  sweeps: low light only, low resolution only, and both combined.
+- **Identical training for every model:** same data, same random capture
+  conditions during training, Adam with weight decay and a one-cycle
+  schedule, 60 epochs, 3 seeds. Every model is trained from scratch, since
+  pretrained weights are not reachable from the environment these runs used.
+- **Cost reported next to accuracy:** parameters, MACs at the input size,
+  single-thread CPU latency.
+
+Dataset: the 5-class synthetic signs from `benchmark.py` (two of the classes,
+`speed_limit_25` and `speed_limit_45`, differ only by their digits), 750
+training and 500 test images at 96px. GTSRB and CURE-TSR runs use the same
+script (`--dataset gtsrb`, `--dataset cure`) and need the datasets locally.
+
+![Accuracy vs. capture severity](assets/vs_sota_synthetic_curves.png)
+
+| Model | Params | MMACs | CPU ms | Clean | Low light, max | Low res, max | Combined, max |
+|---|---|---|---|---|---|---|---|
+| ResNet-18 | 11.18M | 333.1 | 9.3 | 100.0 ± 0.0 | **94.0 ± 1.6** | **99.7 ± 0.4** | **85.2 ± 1.0** |
+| `magno_only` | 0.14M | 0.3 | 0.2 | 98.9 ± 0.7 | 87.1 ± 0.8 | 96.7 ± 1.2 | 82.3 ± 0.7 |
+| `dual_pathway` | 0.90M | 220.8 | 4.9 | 98.2 ± 0.9 | 87.3 ± 0.2 | 94.5 ± 1.8 | 79.9 ± 0.8 |
+| MobileNetV3-Small | 1.52M | 11.1 | 3.0 | 93.0 ± 9.5 | 80.4 ± 0.3 | 90.7 ± 8.3 | 79.9 ± 0.3 |
+| `parvo_only` | 0.57M | 220.3 | 4.5 | 80.4 ± 1.1 | 78.1 ± 0.9 | 81.3 ± 0.5 | 76.4 ± 0.7 |
+
+Accuracy in %, mean ± std over 3 seeds. "Max" is the hardest level of each
+sweep: 0.3% of normal light (about 3 photons at full white), 18% linear
+resolution (a 96px sign reduced to about 17px), or both at once. Full
+per-level numbers are in `vs_sota_synthetic_results.json`.
+
+![Accuracy at max severity vs. compute](assets/vs_sota_synthetic_cost.png)
+
+**The use case that holds up: extreme low light on a compute budget.** At the
+darkest level, `magno_only` (86.6 to 88.2% across seeds) and `dual_pathway`
+(87.0 to 87.6%) both beat MobileNetV3-Small (80.0 to 80.6%) on every seed,
+with no overlap. `magno_only` gets there with 0.3 MMACs and 0.14M params,
+about 1/37 of MobileNetV3-Small's compute and 1/1000 of ResNet-18's. In the
+combined dark-and-far condition the margin over MobileNetV3-Small shrinks to
+about 2 points for `magno_only` and disappears for `dual_pathway`.
+
+**What it does not show:**
+
+- **Parity with ResNet-18.** ResNet-18 wins every condition. The closest
+  either model gets is the combined max level, where `magno_only` is 3 points
+  behind with non-overlapping seed ranges (81.4 to 83.0% vs. 83.8 to 86.2%).
+  "Within 3 points at 1/1000 of the compute" is the accurate claim, not "on par."
+- **That fusion is what earns it.** `magno_only` matches or beats
+  `dual_pathway` in every column. On this task the 16x16 grayscale pathway
+  carries the result, and the color pathway plus gate add 220 MMACs without
+  adding accuracy.
+- **SOTA in the benchmark sense.** Neither baseline is pretrained or tuned
+  for this data. They are standard architectures trained under the same
+  budget, which is a fair comparison but not a comparison against published
+  SOTA numbers.
+- **Real data.** Five synthetic classes is a small, easy task. The GTSRB and
+  CURE-TSR runs are the test that matters.
+
+Two training notes. At 20 epochs, MobileNetV3-Small failed to converge on
+all three seeds (29% clean, near chance) and `dual_pathway` was also
+undertrained, so every model was rerun at 60. Even at 60 epochs one
+MobileNetV3-Small seed plateaued at about 80%, which is the source of its
+large clean-accuracy std. `parvo_only` plateaus at about 80% on every seed
+<!-- PARVO_NOTE -->.
 
 ## Architecture
 
@@ -139,7 +207,20 @@ box over all activated pixels). Not pretrained: you need your own labeled data.
 
 ### Synthetic signs: corruption sweep
 
-<!-- SYNTH_SECTION -->
+The original `benchmark.py` sweep (`benchmark_results.json`,
+`assets/severity_curve.png`, `assets/gate_weights.png`) is superseded. It was
+run before the magno clean-image fix (see Corrections), and the head-to-head
+above is the corrected version of the same experiment on the same synthetic
+signs. `benchmark.py` itself now derives both pathways from the corrupted
+frame if you want to rerun it.
+
+One part of that run should be largely unaffected, because the text head
+only ever sees the parvo input (it was trained jointly with the leaky model,
+so not strictly independent of it): the `TextRegionHead` mask has high recall (0.75)
+and low precision (0.23 clean, 0.21 under heavy corruption). It reliably
+finds the text region and over-predicts its extent.
+
+![Text detection quality](assets/text_metrics.png)
 
 ### A task built to require fusion
 
@@ -149,7 +230,15 @@ while the single-pathway baselines are trained on clean data.
 
 ![A task built to require fusion](assets/fusion_necessary.png)
 
-<!-- FUSION_SECTION -->
+| Model | Accuracy, one pathway missing per sample |
+|---|---|
+| `dual_pathway_lateral` | 80.0% |
+| `dual_pathway` | 79.6% |
+| `parvo_only` | 52.2% |
+| `magno_only` | 50.7% |
+
+This experiment trains and evaluates on clean inputs (before any pathway is
+zeroed), so the magno clean-image fix does not change it.
 
 Caveat: this is a construction, not a deployment scenario. Both pathways are
 derived from one camera frame here, so in a real system they fail together,
