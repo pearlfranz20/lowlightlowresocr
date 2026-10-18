@@ -151,8 +151,9 @@ def main():
 
     num_classes = len(SIGN_IDS)
     print(f"Indexing CURE-TSR under {CURE_TSR_ROOT} ({num_classes} sign classes)...")
-    buckets = index_dataset(CURE_TSR_ROOT)
-    if not buckets:
+    train_buckets = index_dataset(CURE_TSR_ROOT, "train")
+    buckets = index_dataset(CURE_TSR_ROOT, "test")  # every evaluation set below comes from here
+    if not buckets or not train_buckets:
         raise SystemExit("No matching *.bmp files found under cure_tsr_data/.")
 
     clean_test_imgs, clean_test_labs = _sample_split(buckets, challenge=0, level=0, n_per_class=40, seed=1)
@@ -175,7 +176,7 @@ def main():
     for cond_name, cfg in conditions.items():
         print(f"\n########## Condition: {cond_name} ({cfg}) ##########")
         train_imgs, train_labs = _sample_split(
-            buckets, challenge=0, level=0, n_per_class=cfg["n_per_class"], seed=0, augment=cfg["augment"])
+            train_buckets, challenge=0, level=0, n_per_class=cfg["n_per_class"], seed=0, augment=cfg["augment"])
         print(f"  train images: {len(train_labs)}")
 
         class_weights = None

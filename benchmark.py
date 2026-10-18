@@ -155,10 +155,13 @@ def make_batches(imgs, labs, msks, batch_size=16):
 # --------------------------------------------------------------------------
 # Local, continuously-scaled corruption for this benchmark's own curve —
 # see module docstring for why the shared make_dual_inputs degrade step
-# isn't used for training/evaluating classification here. Gray/magno input
-# is still derived from the clean image, same as make_dual_inputs, so
-# magno's accuracy is structurally unaffected by severity — same guarantee
-# the real pipeline gives.
+# isn't used for training/evaluating classification here.
+#
+# Both pathways are derived from the SAME corrupted frame. An earlier version
+# derived magno from the clean image, which handed every magno-equipped model
+# uncorrupted information at test time (a camera only ever produces one
+# degraded frame). Results committed before that fix overstated magno_only
+# and dual_pathway robustness; see the README's "Corrections" section.
 # --------------------------------------------------------------------------
 def corrupt_severity(color_img, severity):
     """Blur first (destroys fine detail — this is what a low-res/low-light
@@ -175,11 +178,11 @@ def corrupt_severity(color_img, severity):
 
 
 def make_inputs_severity(color_img, severity, magno_size=16):
-    gray = (0.299 * color_img[0] + 0.587 * color_img[1] + 0.114 * color_img[2]).unsqueeze(0)
+    color_highres = corrupt_severity(color_img, severity)
+    gray = (0.299 * color_highres[0] + 0.587 * color_highres[1] + 0.114 * color_highres[2]).unsqueeze(0)
     gray_lowres = F.interpolate(
         gray.unsqueeze(0), size=(magno_size, magno_size), mode="bilinear", align_corners=False
     ).squeeze(0)
-    color_highres = corrupt_severity(color_img, severity)
     return gray_lowres, color_highres
 
 
