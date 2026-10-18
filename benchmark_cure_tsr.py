@@ -102,12 +102,31 @@ def _parse_filename(path):
     return seq, sign, challenge, level
 
 
-def index_dataset(root):
-    """Walks root for *.bmp files (any subfolder layout — CURE-TSR release
-    archives aren't laid out consistently across mirrors, so this only
-    trusts the filename, not the directory it's found in) and buckets real
-    (sequenceType==1) sign images by (sign_type, challenge, level)."""
+def _split_of(path, root):
+    parts = [p.lower() for p in path.relative_to(root).parts[:-1]]
+    if any("test" in p for p in parts):
+        return "test"
+    if any("train" in p for p in parts):
+        return "train"
+    return None
+
+
+def index_dataset(root, split):
+    """Walks root for real (sequenceType==1) *.bmp files and buckets them by
+    (sign_type, challenge, level), keeping only files under the release's
+    own train or test folders (any directory whose name contains "train" /
+    "test", e.g. Real_Train/ and Real_Test/).
+
+    split is required. An earlier version ignored directories and drew
+    train and held-out images from one shuffled pool, so "held-out" images
+    could be the very photos (or neighbouring video frames) the model was
+    trained on, and every degraded test image was a re-render of a frame
+    from that same pool. Numbers committed before this fix are optimistic;
+    see the README's "Corrections" section."""
+    if split not in ("train", "test"):
+        raise ValueError("split must be 'train' or 'test'")
     buckets = defaultdict(list)
+    saw_split_dirs = False
     for path in root.rglob("*.bmp"):
         parsed = _parse_filename(path)
         if parsed is None:
@@ -115,7 +134,13 @@ def index_dataset(root):
         seq, sign, challenge, level = parsed
         if seq != 1 or sign not in SIGN_TYPES:
             continue
-        buckets[(sign, challenge, level)].append(path)
+        s = _split_of(path, root)
+        saw_split_dirs |= s is not None
+        if s == split:
+            buckets[(sign, challenge, level)].append(path)
+    if not saw_split_dirs:
+        raise SystemExit("No train/test folders found under cure_tsr_data/. Extract CURE-TSR's "
+                         "Real_Train and Real_Test archives into separate folders.")
     return buckets
 
 
@@ -231,11 +256,12 @@ def main():
 
     num_classes = len(SIGN_IDS)
     print(f"Indexing CURE-TSR under {CURE_TSR_ROOT} ({num_classes} sign classes)...")
-    buckets = index_dataset(CURE_TSR_ROOT)
-    if not buckets:
+    train_buckets = index_dataset(CURE_TSR_ROOT, "train")
+    buckets = index_dataset(CURE_TSR_ROOT, "test")  # every evaluation set below comes from here
+    if not buckets or not train_buckets:
         raise SystemExit("No matching *.bmp files found under cure_tsr_data/ — check the extraction layout.")
 
-    train_imgs, train_labs = _sample_split(buckets, challenge=0, level=0, n_per_class=150, seed=0)
+    train_imgs, train_labs = _sample_split(train_buckets, challenge=0, level=0, n_per_class=150, seed=0)
     if train_imgs is None:
         raise SystemExit("No challenge-free (challenge=00, level=00) real images found to train on.")
     train_loader = make_batches(train_imgs, train_labs)
