@@ -124,8 +124,15 @@ Two training notes. At 20 epochs, MobileNetV3-Small failed to converge on
 all three seeds (29% clean, near chance) and `dual_pathway` was also
 undertrained, so every model was rerun at 60. Even at 60 epochs one
 MobileNetV3-Small seed plateaued at about 80%, which is the source of its
-large clean-accuracy std. `parvo_only` plateaus at about 80% on every seed
-<!-- PARVO_NOTE -->.
+large clean-accuracy std. `parvo_only` plateaus at about 80% on every seed.
+A confusion matrix on clean test images (seed 0, 20 epochs) shows why: it
+classifies stop, yield and warning perfectly and labels both speed-limit
+signs as `speed_limit_45` (98 of 100 for each). The full-resolution color
+pathway never learns the digits, while the 16x16 grayscale pathway does.
+That is unexpected and not yet explained. An optimization problem in
+`ParvoStream` under degradation-aware training (for example, no input
+normalization against cluttered color backgrounds) is the first thing to
+check, and it may also be why the gate leans so heavily on magno.
 
 ## Architecture
 
