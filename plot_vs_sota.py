@@ -35,6 +35,12 @@ LABELS = {
     "resnet18": "ResNet-18",
     "mobilenet_v3_small": "MobileNetV3-S",
 }
+# Points that cluster at ~200-330 MMACs get labels fanned out to the left.
+LABEL_OFFSETS = {
+    "resnet18": (-10, 22, "right"),
+    "dual_pathway": (-10, 6, "right"),
+    "parvo_only": (-10, -14, "right"),
+}
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e6e5e1"
 
 
@@ -71,8 +77,9 @@ def main():
         ax.set_title(sweep.replace("_", " "), color=INK, fontsize=11, loc="left")
         ax.set_xlabel("severity level (0 = clean)", color=MUTED, fontsize=9)
         ax.set_ylim(0, 1.02)
+        ax.set_xticks(range(len(next(iter(models.values()))["accuracy"][sweep])))
     axes[0].set_ylabel("test accuracy", color=MUTED, fontsize=9)
-    axes[-1].text(axes[-1].get_xlim()[1], chance + 0.015, "chance", color=MUTED, fontsize=8, ha="right")
+    axes[0].text(0, chance - 0.05, "chance", color=MUTED, fontsize=8, ha="left")
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=len(labels), frameon=False, fontsize=9,
                bbox_to_anchor=(0.5, -0.02))
@@ -96,8 +103,10 @@ def main():
         mm = max(m["cost"]["mmacs"], 1e-3)
         ax.errorbar(mm, lv["mean"], yerr=lv["std"], fmt="o", color=INK, markersize=7,
                     markeredgecolor="white", ecolor=MUTED, capsize=3)
-        ax.annotate(f"{LABELS.get(name, name)}\n{m['cost']['params'] / 1e6:.2f}M params",
-                    (mm, lv["mean"]), textcoords="offset points", xytext=(8, 4), fontsize=8, color=INK)
+        dx, dy, ha = LABEL_OFFSETS.get(name, (8, 4, "left"))
+        ax.annotate(f"{LABELS.get(name, name)}, {m['cost']['params'] / 1e6:.2f}M params",
+                    (mm, lv["mean"]), textcoords="offset points", xytext=(dx, dy), ha=ha, va="center",
+                    fontsize=8, color=INK)
     ax.set_xscale("log")
     ax.set_xlabel("compute per image (MMACs, log scale)", color=MUTED, fontsize=9)
     ax.set_ylabel(f"accuracy, {hard} level {len(m['accuracy'][hard]) - 1}", color=MUTED, fontsize=9)
